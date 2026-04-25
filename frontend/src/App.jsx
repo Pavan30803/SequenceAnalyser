@@ -82,6 +82,8 @@ const SKIP_TABLE_COLUMNS = [
 const PIE_HOLD_COLORS = ['#d9485f', '#f08949', '#ef7d95', '#5f50cf', '#15938f', '#3c91e6', '#9aa8bc', '#ffc34d']
 const PIE_SKIP_COLORS = ['#ffc145', '#3cb371', '#3c91e6', '#2ec4b6', '#7c4dff', '#ef476f', '#ff8c42', '#9aa8bc']
 const REASON_COLUMN = 'Skip/hold reason'
+const OUTLOOK_COLUMN = 'Outlook'
+const LANDING_IMAGE_URL = 'https://www.bharatbenz.com/uploads/homebanner_images/large/BB-Construction.jpg'
 
 function createReasonBucket() {
   return {
@@ -91,7 +93,12 @@ function createReasonBucket() {
       model: {},
       variant: {},
     },
+    groupOutlooks: {
+      model: {},
+      variant: {},
+    },
     orderReasons: {},
+    orderOutlooks: {},
   }
 }
 
@@ -205,6 +212,17 @@ function getReasonForOrder(row, reasonBucket, fallback = '') {
   return reasonBucket.groupReasons[reasonBucket.groupBy]?.[groupValue] ?? ''
 }
 
+function getOutlookForOrder(row, reasonBucket, fallback = '') {
+  const orderKey = getOrderKey(row, fallback)
+  const directOutlook = reasonBucket.orderOutlooks[orderKey]
+  if (directOutlook !== undefined && directOutlook !== '') {
+    return directOutlook
+  }
+
+  const groupValue = getGroupValue(row, reasonBucket.groupBy)
+  return reasonBucket.groupOutlooks[reasonBucket.groupBy]?.[groupValue] ?? ''
+}
+
 function getPreviewGroupValue(row, groupBy) {
   const aliases =
     groupBy === 'variant'
@@ -222,6 +240,20 @@ function getReasonForPreviewRow(row, reasonBucket, orderKey) {
 
   const groupValue = getPreviewGroupValue(row, reasonBucket.groupBy)
   return reasonBucket.groupReasons[reasonBucket.groupBy]?.[groupValue] ?? ''
+}
+
+function getOutlookForPreviewRow(row, reasonBucket, orderKey) {
+  const directOutlook = reasonBucket.orderOutlooks[orderKey]
+  if (directOutlook !== undefined && directOutlook !== '') {
+    return directOutlook
+  }
+
+  const groupValue = getPreviewGroupValue(row, reasonBucket.groupBy)
+  return reasonBucket.groupOutlooks[reasonBucket.groupBy]?.[groupValue] ?? ''
+}
+
+function formatOutlookValue(value) {
+  return value ? String(value).replace('T', ' ') : ''
 }
 
 function buildOrderLookup(rows) {
@@ -264,14 +296,45 @@ function getPreviewReason(row, reasonConfig, lookups) {
   return ''
 }
 
+function getPreviewOutlook(row, reasonConfig, lookups) {
+  const key = getPreviewOrderKey(row)
+  const state = normalizeLookupKey(getPreviewValue(row, ['Vehicle Order State', 'VEHICLE ORDER STATE', 'State', 'state']))
+  const status = normalizeLookupKey(getPreviewValue(row, ['Status', 'STATUS', 'status']))
+  const holdOrder = key ? lookups.hold.get(key) : null
+  const skipOrder = key ? lookups.skip.get(key) : null
+
+  if (state === 'HOLD' && holdOrder) {
+    return getOutlookForOrder(holdOrder, reasonConfig.hold)
+  }
+  if (state === 'HOLD') {
+    return getOutlookForPreviewRow(row, reasonConfig.hold, key)
+  }
+  if (status === 'TRIM LINE' && skipOrder) {
+    return getOutlookForOrder(skipOrder, reasonConfig.skip)
+  }
+  if (status === 'TRIM LINE') {
+    return getOutlookForPreviewRow(row, reasonConfig.skip, key)
+  }
+  if (holdOrder) {
+    return getOutlookForOrder(holdOrder, reasonConfig.hold)
+  }
+  if (skipOrder) {
+    return getOutlookForOrder(skipOrder, reasonConfig.skip)
+  }
+
+  return ''
+}
+
 function applySkipHoldReasons(sequencedPreview, analysis, reasonConfig) {
-  const baseColumns = sequencedPreview.columns.filter((column) => column !== REASON_COLUMN)
+  const baseColumns = sequencedPreview.columns.filter((column) => ![REASON_COLUMN, OUTLOOK_COLUMN].includes(column))
   const columns = [...baseColumns]
   const statusIndex = columns.indexOf('Status')
   if (statusIndex === -1) {
     columns.push(REASON_COLUMN)
+    columns.push(OUTLOOK_COLUMN)
   } else {
     columns.splice(statusIndex + 1, 0, REASON_COLUMN)
+    columns.splice(statusIndex + 2, 0, OUTLOOK_COLUMN)
   }
 
   if (!analysis) {
@@ -285,6 +348,7 @@ function applySkipHoldReasons(sequencedPreview, analysis, reasonConfig) {
   const rows = sequencedPreview.rows.map((row) => ({
     ...row,
     [REASON_COLUMN]: getPreviewReason(row, reasonConfig, lookups),
+    [OUTLOOK_COLUMN]: formatOutlookValue(getPreviewOutlook(row, reasonConfig, lookups)),
   }))
 
   return {
@@ -743,16 +807,41 @@ function Toasts({ items, onDismiss }) {
   )
 }
 
-function ReasonControls({ title, rows, reasonBucket, onGroupByChange, onGroupSelect, onGroupReasonChange }) {
+function LandingPage({ onEnter }) {
+  return (
+    <section className="landing-page" style={{ backgroundImage: `url(${LANDING_IMAGE_URL})` }}>
+      <div className="landing-overlay" />
+      <div className="landing-content">
+        <h1>Production Planning and Control</h1>
+        <h2>Prime Sequence Analyser</h2>
+        <button type="button" className="landing-enter" onClick={onEnter}>
+          Enter
+          <i className="bi bi-arrow-right" />
+        </button>
+      </div>
+    </section>
+  )
+}
+
+function ReasonControls({
+  title,
+  rows,
+  reasonBucket,
+  onGroupByChange,
+  onGroupSelect,
+  onGroupReasonChange,
+  onGroupOutlookChange,
+}) {
   const groups = getAvailableGroups(rows, reasonBucket.groupBy)
   const selectedGroup = groups.includes(reasonBucket.selectedGroup) ? reasonBucket.selectedGroup : groups[0] ?? ''
   const groupReason = selectedGroup ? reasonBucket.groupReasons[reasonBucket.groupBy]?.[selectedGroup] ?? '' : ''
+  const groupOutlook = selectedGroup ? reasonBucket.groupOutlooks[reasonBucket.groupBy]?.[selectedGroup] ?? '' : ''
 
   return (
     <div className="reason-controls">
       <div>
-        <span className="reason-controls-title">{title} common reason</span>
-        <span className="reason-controls-copy">Apply one reason to every matching order in this list.</span>
+        <span className="reason-controls-title">{title} common inputs</span>
+        <span className="reason-controls-copy">Apply one reason and outlook to every matching order in this list.</span>
       </div>
       <div className="reason-controls-grid">
         <label className="reason-field">
@@ -792,6 +881,16 @@ function ReasonControls({ title, rows, reasonBucket, onGroupByChange, onGroupSel
             disabled={!selectedGroup}
           />
         </label>
+        <label className="reason-field">
+          <span>Outlook</span>
+          <input
+            type="datetime-local"
+            className="form-control form-control-sm"
+            value={groupOutlook}
+            onChange={(event) => onGroupOutlookChange(selectedGroup, event.target.value)}
+            disabled={!selectedGroup}
+          />
+        </label>
       </div>
     </div>
   )
@@ -811,7 +910,9 @@ function ResultsTable({
   onGroupByChange,
   onGroupSelect,
   onGroupReasonChange,
+  onGroupOutlookChange,
   onOrderReasonChange,
+  onOrderOutlookChange,
 }) {
   const isHoldTable = icon.includes('pause')
 
@@ -842,6 +943,7 @@ function ResultsTable({
               onGroupByChange={onGroupByChange}
               onGroupSelect={onGroupSelect}
               onGroupReasonChange={onGroupReasonChange}
+              onGroupOutlookChange={onGroupOutlookChange}
             />
             <div className="table-scroll-sm">
               <table className="table table-hover table-bordered mb-0 data-table">
@@ -851,14 +953,18 @@ function ResultsTable({
                       <th key={label}>{label}</th>
                     ))}
                     <th>{REASON_COLUMN}</th>
+                    <th>{OUTLOOK_COLUMN}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {rows.map((row, index) => {
                     const orderKey = getOrderKey(row, index)
                     const directReason = reasonBucket.orderReasons[orderKey]
+                    const directOutlook = reasonBucket.orderOutlooks[orderKey]
                     const effectiveReason = getReasonForOrder(row, reasonBucket, index)
-                    const inherited = directReason === undefined && effectiveReason
+                    const effectiveOutlook = getOutlookForOrder(row, reasonBucket, index)
+                    const inheritedReason = directReason === undefined && effectiveReason
+                    const inheritedOutlook = directOutlook === undefined && effectiveOutlook
 
                     return (
                       <tr key={`${title}-${row.serial || row.dsn || index}`} className={isHoldTable ? 'row-hold' : 'row-skip'}>
@@ -875,7 +981,16 @@ function ResultsTable({
                             value={effectiveReason}
                             onChange={(event) => onOrderReasonChange(orderKey, event.target.value)}
                           />
-                          {inherited ? <small>Grouped by {reasonBucket.groupBy}</small> : null}
+                          {inheritedReason ? <small>Grouped by {reasonBucket.groupBy}</small> : null}
+                        </td>
+                        <td className="outlook-cell">
+                          <input
+                            type="datetime-local"
+                            className="form-control form-control-sm"
+                            value={effectiveOutlook}
+                            onChange={(event) => onOrderOutlookChange(orderKey, event.target.value)}
+                          />
+                          {inheritedOutlook ? <small>Grouped by {reasonBucket.groupBy}</small> : null}
                         </td>
                       </tr>
                     )
@@ -937,6 +1052,7 @@ function App() {
   const [shortages, setShortages] = useState([createShortageRow()])
   const [analysis, setAnalysis] = useState(null)
   const [reasonConfig, setReasonConfig] = useState(createReasonState)
+  const [showLanding, setShowLanding] = useState(true)
   const [loading, setLoading] = useState(false)
   const [toasts, setToasts] = useState([])
   const resultsRef = useRef(null)
@@ -1055,6 +1171,22 @@ function App() {
     }))
   }
 
+  function updateGroupOutlook(kind, groupValue, outlook) {
+    if (!groupValue) {
+      return
+    }
+    updateReasonBucket(kind, (bucket) => ({
+      ...bucket,
+      groupOutlooks: {
+        ...bucket.groupOutlooks,
+        [bucket.groupBy]: {
+          ...bucket.groupOutlooks[bucket.groupBy],
+          [groupValue]: outlook,
+        },
+      },
+    }))
+  }
+
   function updateOrderReason(kind, orderKey, reason) {
     updateReasonBucket(kind, (bucket) => ({
       ...bucket,
@@ -1062,6 +1194,18 @@ function App() {
         Object.entries({
           ...bucket.orderReasons,
           [orderKey]: reason,
+        }).filter(([, value]) => value !== ''),
+      ),
+    }))
+  }
+
+  function updateOrderOutlook(kind, orderKey, outlook) {
+    updateReasonBucket(kind, (bucket) => ({
+      ...bucket,
+      orderOutlooks: Object.fromEntries(
+        Object.entries({
+          ...bucket.orderOutlooks,
+          [orderKey]: outlook,
         }).filter(([, value]) => value !== ''),
       ),
     }))
@@ -1142,6 +1286,10 @@ function App() {
     analysis?.summary?.skip_region_stratification?.Domestic || 0,
     analysis?.summary?.skip_region_stratification?.Export || 0,
   ]
+
+  if (showLanding) {
+    return <LandingPage onEnter={() => setShowLanding(false)} />
+  }
 
   return (
     <div className="app-shell">
@@ -1517,7 +1665,9 @@ function App() {
               onGroupByChange={(groupBy) => updateReasonGroupBy('skip', groupBy)}
               onGroupSelect={(group) => updateReasonGroup('skip', group)}
               onGroupReasonChange={(group, reason) => updateGroupReason('skip', group, reason)}
+              onGroupOutlookChange={(group, outlook) => updateGroupOutlook('skip', group, outlook)}
               onOrderReasonChange={(orderKey, reason) => updateOrderReason('skip', orderKey, reason)}
+              onOrderOutlookChange={(orderKey, outlook) => updateOrderOutlook('skip', orderKey, outlook)}
             />
 
             <ResultsTable
@@ -1533,7 +1683,9 @@ function App() {
               onGroupByChange={(groupBy) => updateReasonGroupBy('hold', groupBy)}
               onGroupSelect={(group) => updateReasonGroup('hold', group)}
               onGroupReasonChange={(group, reason) => updateGroupReason('hold', group, reason)}
+              onGroupOutlookChange={(group, outlook) => updateGroupOutlook('hold', group, outlook)}
               onOrderReasonChange={(orderKey, reason) => updateOrderReason('hold', orderKey, reason)}
+              onOrderOutlookChange={(orderKey, outlook) => updateOrderOutlook('hold', orderKey, outlook)}
             />
 
             <section className="panel-card mb-4">

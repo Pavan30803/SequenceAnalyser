@@ -2,6 +2,83 @@
   min-height: 100vh;
 }
 
+.landing-page {
+  position: relative;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background-position: center;
+  background-size: cover;
+  color: #fff;
+}
+
+.landing-overlay {
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(90deg, rgba(5, 16, 29, 0.72), rgba(5, 16, 29, 0.28) 48%, rgba(5, 16, 29, 0.1)),
+    linear-gradient(0deg, rgba(5, 16, 29, 0.58), rgba(5, 16, 29, 0.06) 45%, rgba(5, 16, 29, 0.22));
+}
+
+.landing-content {
+  position: relative;
+  z-index: 1;
+  width: min(64rem, calc(100vw - 2rem));
+  padding: clamp(2rem, 7vw, 5rem) 0;
+}
+
+.landing-content h1 {
+  margin: 0;
+  max-width: 58rem;
+  color: #fff;
+  font-size: clamp(2.6rem, 7vw, 6.3rem);
+  font-weight: 900;
+  line-height: 1.02;
+  text-shadow: 0 0.25rem 1.5rem rgba(0, 0, 0, 0.34);
+}
+
+.landing-content h2 {
+  margin: 1rem 0 2.25rem;
+  color: #ffc145;
+  font-size: clamp(1.35rem, 3vw, 2.6rem);
+  font-weight: 800;
+  line-height: 1.12;
+  text-shadow: 0 0.2rem 1rem rgba(0, 0, 0, 0.32);
+}
+
+.landing-enter {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.65rem;
+  min-width: 9.5rem;
+  min-height: 3.2rem;
+  border: 0;
+  border-radius: 0.45rem;
+  background: #ffc145;
+  color: #10243a;
+  font-size: 1rem;
+  font-weight: 900;
+  box-shadow: 0 1rem 2.5rem rgba(0, 0, 0, 0.28);
+  transition:
+    transform 160ms ease,
+    background-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.landing-enter:hover,
+.landing-enter:focus-visible {
+  background: #ffd36f;
+  transform: translateY(-2px);
+  box-shadow: 0 1.25rem 3rem rgba(0, 0, 0, 0.34);
+}
+
+.landing-enter:focus-visible {
+  outline: 0.2rem solid rgba(255, 255, 255, 0.86);
+  outline-offset: 0.25rem;
+}
+
 .hero-bar {
   background:
     radial-gradient(circle at top left, rgba(255, 196, 69, 0.22), transparent 32%),
@@ -338,7 +415,7 @@
 
 .reason-controls-grid {
   display: grid;
-  grid-template-columns: minmax(8rem, 0.8fr) minmax(9rem, 1fr) minmax(14rem, 2fr);
+  grid-template-columns: minmax(8rem, 0.7fr) minmax(9rem, 0.9fr) minmax(14rem, 1.8fr) minmax(13rem, 1.2fr);
   gap: 0.75rem;
   align-items: end;
 }
@@ -357,15 +434,26 @@
   letter-spacing: 0.04em;
 }
 
-.reason-cell {
+.reason-cell,
+.outlook-cell {
   min-width: 18rem;
 }
 
-.reason-cell .form-control {
+.outlook-cell {
+  min-width: 15rem;
+}
+
+.reason-cell .form-control,
+.outlook-cell .form-control {
   min-width: 16rem;
 }
 
-.reason-cell small {
+.outlook-cell .form-control {
+  min-width: 13rem;
+}
+
+.reason-cell small,
+.outlook-cell small {
   display: block;
   margin-top: 0.25rem;
   color: #5d6878;
