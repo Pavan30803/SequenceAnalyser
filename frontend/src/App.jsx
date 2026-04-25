@@ -320,6 +320,74 @@ function formatLineTime(date) {
   return `${hours}:${minutes} ${meridiem}`
 }
 
+const PRODUCTION_BREAKS = [
+  { start: 9 * 60 + 30, end: 9 * 60 + 37 },
+  { start: 11 * 60 + 30, end: 12 * 60 },
+  { start: 14 * 60 + 30, end: 14 * 60 + 37 },
+  { start: 18 * 60 + 30, end: 18 * 60 + 37 },
+  { start: 20 * 60 + 30, end: 21 * 60 },
+  { start: 24 * 60, end: 24 * 60 + 7 },
+]
+
+function createShiftTime(productionDate, minutesFromMidnight) {
+  const date = new Date(productionDate)
+  date.setHours(0, 0, 0, 0)
+  date.setMinutes(minutesFromMidnight)
+  return date
+}
+
+function getBreakWindows(productionDate) {
+  return PRODUCTION_BREAKS.map((breakWindow) => ({
+    start: createShiftTime(productionDate, breakWindow.start),
+    end: createShiftTime(productionDate, breakWindow.end),
+  }))
+}
+
+function skipProductionBreaks(date, productionDate) {
+  let adjustedDate = new Date(date)
+  let moved = true
+
+  while (moved) {
+    moved = false
+    for (const breakWindow of getBreakWindows(productionDate)) {
+      if (adjustedDate >= breakWindow.start && adjustedDate < breakWindow.end) {
+        adjustedDate = new Date(breakWindow.end)
+        moved = true
+        break
+      }
+    }
+  }
+
+  return adjustedDate
+}
+
+function addProductionMinutes(date, minutes, productionDate) {
+  let currentTime = skipProductionBreaks(date, productionDate)
+  let remainingMinutes = minutes
+
+  while (remainingMinutes > 0) {
+    const nextBreak = getBreakWindows(productionDate).find((breakWindow) => currentTime < breakWindow.end)
+    if (!nextBreak) {
+      return new Date(currentTime.getTime() + remainingMinutes * 60000)
+    }
+
+    if (currentTime >= nextBreak.start) {
+      currentTime = new Date(nextBreak.end)
+      continue
+    }
+
+    const minutesUntilBreak = (nextBreak.start.getTime() - currentTime.getTime()) / 60000
+    if (remainingMinutes <= minutesUntilBreak) {
+      return skipProductionBreaks(new Date(currentTime.getTime() + remainingMinutes * 60000), productionDate)
+    }
+
+    remainingMinutes -= minutesUntilBreak
+    currentTime = new Date(nextBreak.end)
+  }
+
+  return skipProductionBreaks(currentTime, productionDate)
+}
+
 function applySequence(previewColumns, previewData, capacityValue, startDate, holidays) {
   if (!Array.isArray(previewColumns) || !Array.isArray(previewData) || previewData.length === 0) {
     return {
@@ -400,18 +468,12 @@ function applySequence(previewColumns, previewData, capacityValue, startDate, ho
       currentTime.setHours(7, 0, 0, 0)
     }
 
+    currentTime = skipProductionBreaks(currentTime, currentDate)
     row['Line in sequence'] = counter
     row['Production Date'] = formatDateKey(currentDate)
     row['Line in time'] = formatLineTime(currentTime)
 
-    currentTime = new Date(currentTime.getTime() + taktTime * 60000)
-    const timeInMinutes = currentTime.getHours() * 60 + currentTime.getMinutes()
-
-    if (timeInMinutes >= 11 * 60 + 30 && timeInMinutes < 12 * 60) {
-      currentTime.setHours(12, 0, 0, 0)
-    } else if (timeInMinutes >= 20 * 60 + 30 && timeInMinutes < 21 * 60) {
-      currentTime.setHours(21, 0, 0, 0)
-    }
+    currentTime = addProductionMinutes(currentTime, taktTime, currentDate)
 
     counter += 1
     if (counter > todayCapacity) {
