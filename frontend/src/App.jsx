@@ -98,6 +98,86 @@ const LINE_TYPES = {
     thursdayMinutes: 541,
   },
 }
+const REPORT_TYPES = {
+  opening: {
+    title: 'Opening Report',
+    shortTitle: 'Opening',
+    copy: 'Initial shift report used for sequence planning.',
+  },
+  mod: {
+    title: 'MOD Report',
+    shortTitle: 'MOD',
+    copy: 'Updated mid-shift report for refreshed analytics.',
+  },
+}
+
+function getInitialLineType() {
+  const lineParam = new URLSearchParams(window.location.search).get('line')?.toUpperCase()
+  return LINE_TYPES[lineParam] ? lineParam : 'HDT'
+}
+
+function getInitialLandingState() {
+  const params = new URLSearchParams(window.location.search)
+  return !(params.get('view') === 'app' || params.has('line'))
+}
+
+function getLineTabUrl(lineType) {
+  const url = new URL(window.location.href)
+  url.searchParams.set('line', lineType)
+  url.searchParams.set('view', 'app')
+  return url.toString()
+}
+
+const WORKSPACE_DB_NAME = 'sequence-analyser-workspace'
+const WORKSPACE_STORE_NAME = 'workspaces'
+
+function openWorkspaceDb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(WORKSPACE_DB_NAME, 1)
+
+    request.onupgradeneeded = () => {
+      const db = request.result
+      if (!db.objectStoreNames.contains(WORKSPACE_STORE_NAME)) {
+        db.createObjectStore(WORKSPACE_STORE_NAME)
+      }
+    }
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error)
+  })
+}
+
+async function transactWorkspace(mode, callback) {
+  const db = await openWorkspaceDb()
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(WORKSPACE_STORE_NAME, mode)
+    const store = transaction.objectStore(WORKSPACE_STORE_NAME)
+    const request = callback(store)
+
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error)
+    transaction.oncomplete = () => db.close()
+    transaction.onerror = () => {
+      db.close()
+      reject(transaction.error)
+    }
+  })
+}
+
+function getWorkspaceKey(lineType) {
+  return `${lineType}-workspace`
+}
+
+function readWorkspace(lineType) {
+  return transactWorkspace('readonly', (store) => store.get(getWorkspaceKey(lineType)))
+}
+
+function writeWorkspace(lineType, workspace) {
+  return transactWorkspace('readwrite', (store) => store.put(workspace, getWorkspaceKey(lineType)))
+}
+
+function clearWorkspace(lineType) {
+  return transactWorkspace('readwrite', (store) => store.delete(getWorkspaceKey(lineType)))
+}
 
 function createReasonBucket() {
   return {
@@ -124,7 +204,7 @@ function createReasonState() {
 }
 
 function getPartNumberFromFileName(fileName = '') {
-  return fileName.replace(/\.[^/.]+$/, '').trim()
+  return fileName.replace(/\.[^/.]+$/, '').replaceAll('.', '').trim()
 }
 
 function createShortageRow(file = null) {
@@ -1079,21 +1159,24 @@ function App() {
   const shortageBatchInputId = useId()
   const shortageIntro =
     'Upload variant Excel files, confirm the derived part number, and provide part name, reference order, and quantity for each shortage.'
-  const [selectedFile, setSelectedFile] = useState(null)
-  const [dragActive, setDragActive] = useState(false)
+  const [reportFiles, setReportFiles] = useState({ opening: null, mod: null })
+  const [dragActiveReport, setDragActiveReport] = useState(null)
   const [capacity, setCapacity] = useState('')
   const [startDate, setStartDate] = useState('')
-  const [lineType, setLineType] = useState('HDT')
+  const [lineType] = useState(getInitialLineType)
   const [holidayInput, setHolidayInput] = useState('')
   const [holidays, setHolidays] = useState([])
   const [shortages, setShortages] = useState([createShortageRow()])
-  const [analysis, setAnalysis] = useState(null)
+  const [analyses, setAnalyses] = useState({ opening: null, mod: null })
+  const [activeReport, setActiveReport] = useState('opening')
   const [reasonConfig, setReasonConfig] = useState(createReasonState)
-  const [showLanding, setShowLanding] = useState(true)
+  const [showLanding, setShowLanding] = useState(getInitialLandingState)
   const [loading, setLoading] = useState(false)
   const [toasts, setToasts] = useState([])
   const resultsRef = useRef(null)
   const toastCounterRef = useRef(0)
+  const workspaceLoadedRef = useRef(false)
+  const workspaceSaveTimerRef = useRef(null)
   const shortagePartNames = shortages.reduce((partNames, shortage) => {
     const part = shortage.part.trim()
     const partName = shortage.partName.trim()
@@ -1103,6 +1186,8 @@ function App() {
     }
     return partNames
   }, {})
+  const analysis = analyses[activeReport] ?? analyses.opening ?? analyses.mod
+  const availableReports = Object.keys(REPORT_TYPES).filter((reportKey) => analyses[reportKey])
 
   const sequencedPreview = applySequence(
     analysis?.previewColumns ?? [],
@@ -1122,6 +1207,69 @@ function App() {
     }
     resultsRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }, [analysis])
+
+  useEffect(() => {
+    let cancelled = false
+
+    readWorkspace(lineType)
+      .then((workspace) => {
+        if (cancelled) {
+          return
+        }
+
+        if (workspace) {
+          setReportFiles(workspace.reportFiles ?? { opening: null, mod: null })
+          setCapacity(workspace.capacity ?? '')
+          setStartDate(workspace.startDate ?? '')
+          setHolidayInput(workspace.holidayInput ?? '')
+          setHolidays(Array.isArray(workspace.holidays) ? workspace.holidays : [])
+          setShortages(Array.isArray(workspace.shortages) && workspace.shortages.length ? workspace.shortages : [createShortageRow()])
+          setAnalyses(workspace.analyses ?? { opening: null, mod: null })
+          setActiveReport(workspace.activeReport ?? 'opening')
+          setReasonConfig(workspace.reasonConfig ?? createReasonState())
+        }
+      })
+      .catch(() => {
+        pushToast('Saved workspace could not be restored in this browser.', 'warning')
+      })
+      .finally(() => {
+        if (!cancelled) {
+          workspaceLoadedRef.current = true
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [lineType])
+
+  useEffect(() => {
+    if (!workspaceLoadedRef.current) {
+      return undefined
+    }
+
+    window.clearTimeout(workspaceSaveTimerRef.current)
+    workspaceSaveTimerRef.current = window.setTimeout(() => {
+      writeWorkspace(lineType, {
+        reportFiles,
+        capacity,
+        startDate,
+        holidayInput,
+        holidays,
+        shortages,
+        analyses,
+        activeReport,
+        reasonConfig,
+        savedAt: new Date().toISOString(),
+      }).catch(() => {
+        pushToast('Workspace could not be saved in this browser.', 'warning')
+      })
+    }, 500)
+
+    return () => {
+      window.clearTimeout(workspaceSaveTimerRef.current)
+    }
+  }, [lineType, reportFiles, capacity, startDate, holidayInput, holidays, shortages, analyses, activeReport, reasonConfig])
 
   function pushToast(message, type = 'danger') {
     toastCounterRef.current += 1
@@ -1165,6 +1313,20 @@ function App() {
     })
   }
 
+  function updateReportFile(reportKey, file) {
+    setReportFiles((current) => ({
+      ...current,
+      [reportKey]: file,
+    }))
+    setAnalyses((current) => ({
+      ...current,
+      [reportKey]: null,
+    }))
+    if (activeReport === reportKey) {
+      setActiveReport('opening')
+    }
+  }
+
   function removeShortage(id) {
     setShortages((current) => {
       if (current.length === 1) {
@@ -1187,15 +1349,18 @@ function App() {
   }
 
   function resetAll() {
-    setSelectedFile(null)
-    setDragActive(false)
+    clearWorkspace(lineType).catch(() => {
+      pushToast('Saved workspace could not be cleared in this browser.', 'warning')
+    })
+    setReportFiles({ opening: null, mod: null })
+    setDragActiveReport(null)
     setCapacity('')
     setStartDate('')
-    setLineType('HDT')
     setHolidayInput('')
     setHolidays([])
     setShortages([createShortageRow()])
-    setAnalysis(null)
+    setAnalyses({ opening: null, mod: null })
+    setActiveReport('opening')
     setReasonConfig(createReasonState())
     setToasts([])
   }
@@ -1278,15 +1443,9 @@ function App() {
     }))
   }
 
-  async function runAnalysis() {
-    if (!selectedFile) {
-      pushToast('Action blocked: please upload a main report file.', 'warning')
-      return
-    }
-
-    setLoading(true)
+  function buildAnalysisFormData(file) {
     const formData = new FormData()
-    formData.append('file', selectedFile)
+    formData.append('file', file)
 
     for (const shortage of shortages) {
       if (shortage.part.trim() && shortage.file) {
@@ -1297,16 +1456,39 @@ function App() {
       }
     }
 
+    return formData
+  }
+
+  async function analyzeReport(file) {
+    const response = await fetch('/api/analyze', { method: 'POST', body: buildAnalysisFormData(file) })
+    const raw = await response.json()
+    if (!response.ok || raw.error) {
+      throw new Error(raw.error || 'Server returned an unexpected error.')
+    }
+    return normalizeData(raw)
+  }
+
+  async function runAnalysis() {
+    if (!reportFiles.opening) {
+      pushToast('Action blocked: please upload the opening report first.', 'warning')
+      return
+    }
+
+    const reportsToAnalyze = Object.keys(REPORT_TYPES).filter((reportKey) => reportFiles[reportKey])
+
+    setLoading(true)
     try {
-      const response = await fetch('/api/analyze', { method: 'POST', body: formData })
-      const raw = await response.json()
-      if (!response.ok || raw.error) {
-        throw new Error(raw.error || 'Server returned an unexpected error.')
+      const nextAnalyses = {}
+      for (const reportKey of reportsToAnalyze) {
+        nextAnalyses[reportKey] = await analyzeReport(reportFiles[reportKey])
       }
 
       startTransition(() => {
-        setAnalysis(normalizeData(raw))
-        setReasonConfig(createReasonState())
+        setAnalyses((current) => ({
+          ...current,
+          ...nextAnalyses,
+        }))
+        setActiveReport(nextAnalyses.mod ? 'mod' : 'opening')
       })
     } catch (error) {
       pushToast(`Network error: ${error.message}`, 'danger')
@@ -1363,16 +1545,11 @@ function App() {
       <Toasts items={toasts} onDismiss={dismissToast} />
 
       <header className="hero-bar">
-        <div className="hero-symbol">
-          <i className="bi bi-diagram-3-fill" />
-        </div>
-        <div>
-          <p className="hero-kicker">Sequence intelligence workspace</p>
-          <h1>Sequence &amp; Skip Order Analyzer</h1>
-          <p className="hero-copy">
-            React frontend with the existing Flask impact engine behind it. Upload the production report, layer in shortage
-            mapping, and inspect the affected vehicles in one flow.
-          </p>
+        <div className="hero-title-wrap">
+          <div className="hero-title-block">
+            <h1>Production Planning and Control</h1>
+            <p>{LINE_TYPES[lineType].title} Sequence Analyser</p>
+          </div>
         </div>
       </header>
 
@@ -1385,15 +1562,22 @@ function App() {
           </div>
           <div className="line-type-actions" role="group" aria-label="Select HDT or MDT">
             {Object.keys(LINE_TYPES).map((type) => (
-              <button
+              <a
                 key={type}
-                type="button"
                 className={`line-type-button ${lineType === type ? 'active' : ''}`}
-                onClick={() => setLineType(type)}
+                href={lineType === type ? undefined : getLineTabUrl(type)}
+                target={lineType === type ? undefined : '_blank'}
+                rel={lineType === type ? undefined : 'noreferrer'}
                 aria-pressed={lineType === type}
+                aria-current={lineType === type ? 'page' : undefined}
+                onClick={(event) => {
+                  if (lineType === type) {
+                    event.preventDefault()
+                  }
+                }}
               >
                 {type}
-              </button>
+              </a>
             ))}
           </div>
         </section>
@@ -1570,39 +1754,50 @@ function App() {
             <div className="step-card h-100">
               <div className="step-header">
                 <span>
-                  <i className="bi bi-3-circle-fill" /> Step 3: Upload report
+                  <i className="bi bi-3-circle-fill" /> Step 3: Upload reports
                 </span>
               </div>
               <div className="step-body d-flex flex-column">
-                <label
-                  htmlFor={fileInputId}
-                  className={`upload-zone ${dragActive ? 'drag-active' : ''}`}
-                  onDragOver={(event) => {
-                    event.preventDefault()
-                    setDragActive(true)
-                  }}
-                  onDragLeave={() => setDragActive(false)}
-                  onDrop={(event) => {
-                    event.preventDefault()
-                    setDragActive(false)
-                    const file = event.dataTransfer.files?.[0]
-                    if (file) {
-                      setSelectedFile(file)
-                    }
-                  }}
-                >
-                  <i className="bi bi-file-earmark-spreadsheet upload-icon" />
-                  <span className="upload-title">Drop the main sequence report here</span>
-                  <span className="upload-copy">or click to browse `.xlsx`, `.xls`, or `.csv` files</span>
-                  <strong className="upload-file">{selectedFile?.name || 'No file selected'}</strong>
-                </label>
-                <input
-                  id={fileInputId}
-                  type="file"
-                  accept=".xlsx,.xls,.csv"
-                  className="d-none"
-                  onChange={(event) => setSelectedFile(event.target.files?.[0] ?? null)}
-                />
+                <div className="report-upload-grid">
+                  {Object.entries(REPORT_TYPES).map(([reportKey, report]) => {
+                    const inputId = `${fileInputId}-${reportKey}`
+                    const selectedReportFile = reportFiles[reportKey]
+
+                    return (
+                      <div key={reportKey}>
+                        <label
+                          htmlFor={inputId}
+                          className={`report-upload-card ${dragActiveReport === reportKey ? 'drag-active' : ''}`}
+                          onDragOver={(event) => {
+                            event.preventDefault()
+                            setDragActiveReport(reportKey)
+                          }}
+                          onDragLeave={() => setDragActiveReport(null)}
+                          onDrop={(event) => {
+                            event.preventDefault()
+                            setDragActiveReport(null)
+                            const file = event.dataTransfer.files?.[0]
+                            if (file) {
+                              updateReportFile(reportKey, file)
+                            }
+                          }}
+                        >
+                          <i className="bi bi-file-earmark-spreadsheet upload-icon" />
+                          <span className="upload-title">{report.title}</span>
+                          <span className="upload-copy">{report.copy}</span>
+                          <strong className="upload-file">{selectedReportFile?.name || 'No file selected'}</strong>
+                        </label>
+                        <input
+                          id={inputId}
+                          type="file"
+                          accept=".xlsx,.xls,.csv"
+                          className="d-none"
+                          onChange={(event) => updateReportFile(reportKey, event.target.files?.[0] ?? null)}
+                        />
+                      </div>
+                    )
+                  })}
+                </div>
 
                 <div className="action-row">
                   <button className="btn btn-outline-secondary btn-sm px-3" type="button" onClick={resetAll}>
@@ -1633,6 +1828,27 @@ function App() {
 
         {analysis ? (
           <div ref={resultsRef} className="results-shell">
+            <section className="report-view-panel" aria-label="Report analytics selector">
+              <div>
+                <span className="line-type-kicker">Analytics view</span>
+                <h2>{REPORT_TYPES[activeReport].title}</h2>
+                <p>{REPORT_TYPES[activeReport].copy}</p>
+              </div>
+              <div className="report-view-actions" role="group" aria-label="Select report analytics">
+                {availableReports.map((reportKey) => (
+                  <button
+                    key={reportKey}
+                    type="button"
+                    className={`report-view-button ${activeReport === reportKey ? 'active' : ''}`}
+                    onClick={() => setActiveReport(reportKey)}
+                    aria-pressed={activeReport === reportKey}
+                  >
+                    {REPORT_TYPES[reportKey].shortTitle}
+                  </button>
+                ))}
+              </div>
+            </section>
+
             <section className="row g-3 mb-4 mt-1">
               <StatCard label="Total Hold Orders" value={analysis.summary.total_hold || 0} tone="hold" icon="bi-pause-circle" />
               <StatCard
