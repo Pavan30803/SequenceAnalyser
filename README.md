@@ -34,6 +34,8 @@ The Sequence Analyzer is a production-planning web application for analyzing veh
 - Sequence gaps caused by abnormal serial-number movement.
 - Impacted vehicle models, variants, work-content classes, and domestic/export regions.
 - Part-shortage impact when shortage files and remaining stock quantities are supplied.
+- Opening and mid-day MOD report comparison using the same mapped constraints.
+- Engine and transmission status mapping by order number.
 - Scheduled production dates, line sequence numbers, and line-in-time values based on capacity and working-day rules.
 
 The application is built as a Flask backend with a React/Vite frontend. The backend performs file parsing and sequence analysis. The frontend handles the operator workflow, visual dashboards, schedule projection, CSV exports, and reason/outlook annotation.
@@ -42,16 +44,17 @@ The application is built as a Flask backend with a React/Vite frontend. The back
 
 At a high level, the system works like this:
 
-1. The user opens the web application.
-2. The user configures production capacity, start date, holidays, and optional shortage inputs.
-3. The user uploads a main sequence report in `.xlsx`, `.xls`, or `.csv` format.
-4. The frontend submits the report and shortage metadata to `POST /api/analyze`.
-5. The Flask backend reads the uploaded file into a Pandas DataFrame.
-6. The backend detects required columns, classifies vehicle records, detects holds and skips, maps shortage columns, and returns JSON.
-7. The React frontend normalizes the JSON response.
-8. The frontend applies production scheduling rules to the returned preview data.
-9. Charts, anomaly tables, hold/skip tables, data preview, shortage heatmap, and inference cards are rendered.
-10. The user can annotate reasons/outlooks and export CSV data.
+1. The user opens the landing page and enters the analyzer.
+2. The user selects either the HDT or MDT analyzer. Each can run in its own browser tab.
+3. The user configures production capacity, start date, holidays, and optional shortage inputs.
+4. The user uploads an opening report and, optionally, a MOD report and engine/transmission status report.
+5. The frontend submits each available report and shared mapping metadata to `POST /api/analyze`.
+6. The Flask backend reads the uploaded file into a Pandas DataFrame.
+7. The backend detects required columns, classifies vehicle records, detects holds and skips, maps shortage/status columns, and returns JSON.
+8. The React frontend normalizes the JSON response.
+9. The frontend applies HDT or MDT production scheduling rules to the returned preview data.
+10. Charts, anomaly tables, hold/skip tables, data preview, shortage heatmap, and inference cards are rendered for the selected report view.
+11. The user can annotate reasons/outlooks and export CSV data.
 
 ## Repository Layout
 
@@ -219,17 +222,23 @@ If `frontend/dist/index.html` does not exist, Flask falls back to the root-level
 
 The current React UI supports this operator flow:
 
-1. Enter production capacity.
-2. Select the production start date.
-3. Add optional holidays.
-4. Add optional shortage rows:
-   - Part number
-   - Reference order
-   - Available quantity
-   - Variant mapping file
-5. Upload the main sequence report.
-6. Click `Analyze`.
-7. Review:
+1. Enter from the landing page.
+2. Choose `HDT` or `MDT`.
+   - Clicking the inactive line opens a dedicated tab with that analyzer selected.
+   - HDT and MDT keep separate saved workspaces in the browser.
+3. Enter production capacity.
+4. Select the production start date.
+5. Add optional holidays.
+6. Upload one or more shortage variant files in Step 2.
+   - Part number is derived from the uploaded filename.
+   - Dots in the filename are ignored for the part number.
+   - User can enter part name, reference order, and available quantity for each uploaded file.
+7. Upload Step 3 reports:
+   - Opening Report: required first.
+   - MOD Report: optional mid-day updated report.
+   - Engine & Transmission Status Report: optional shared mapping file.
+8. Click `Analyze`.
+9. Review Opening or MOD analytics using the report-view selector:
    - Hold count
    - Skip count
    - Hold/skip charts
@@ -238,8 +247,10 @@ The current React UI supports this operator flow:
    - Hold order table
    - Full data preview
    - Shortage impact cards
-8. Optionally add skip/hold reasons and outlook dates.
-9. Download CSV exports.
+10. Optionally add skip/hold reasons and outlook dates.
+11. Download CSV exports.
+
+Inputs and analysis data are saved in the browser with IndexedDB. Refreshing the page restores the current line's workspace, including uploaded files, shortage mappings, report files, annotations, and analysis results. The `Reset` button clears the saved workspace for the current HDT or MDT tab.
 
 ## Input File Requirements
 
@@ -253,7 +264,7 @@ The backend accepts:
 
 The upload is rejected if the main sequence filename does not end with one of these extensions.
 
-### Main sequence report
+### Opening and MOD sequence reports
 
 The analyzer attempts to discover important columns by name first, then falls back to positional indexes.
 
@@ -269,6 +280,8 @@ The analyzer attempts to discover important columns by name first, then falls ba
 
 If the serial-number or state column cannot be found, backend processing raises an error.
 
+The Opening Report and MOD Report use the same file requirements and analysis logic. Opening is the primary morning report. MOD is an optional mid-shift update that can be uploaded and analyzed later using the same mapped constraints from the opening report.
+
 ### Important optional columns
 
 The backend preserves selected optional columns when present:
@@ -282,12 +295,31 @@ These are included in hold/skip records and preview output when available.
 
 ### Shortage variant files
 
-Each shortage row can include a separate uploaded file. For shortage files:
+Each shortage row can include a separate uploaded file. The frontend also supports multi-file upload, creating one shortage detail row for each file. For shortage files:
 
 - Supported formats are the same as the main report.
 - Variant values are extracted from Column F / index `5`.
 - Values are normalized by trimming whitespace and converting to uppercase.
 - Each matching variant in the main sequence is evaluated against available quantity.
+- Part number is derived from the uploaded filename, with the extension removed and dots ignored.
+- Part name is entered manually by the user and displayed in shortage impact analysis.
+
+### Engine and transmission status report
+
+The optional Engine & Transmission Status Report maps additional statuses into the Data Preview.
+
+| Logical Field | Source Position | Notes |
+| --- | --- | --- |
+| Order Number | Column C / index 2 | Leading `00` is ignored before matching. |
+| Engine status | Column J / index 9 | Inserted into Data Preview. |
+| Transmission status | Column L / index 11 | Inserted into Data Preview. |
+
+The backend matches this report to the sequence report by normalized order number. The inserted preview columns are named:
+
+- `Engine status`
+- `Transmission status`
+
+They are inserted immediately to the right of `Hold Status` when `Hold Status` is available.
 
 ## Backend Architecture
 
@@ -354,7 +386,7 @@ This allows the same Flask process to serve either the built React app or the le
 
 ### `POST /api/analyze`
 
-Analyzes a main sequence file and optional shortage files.
+Analyzes one sequence file and optional shared mapping files. The frontend calls this endpoint separately for Opening and MOD reports when both are present.
 
 Content type:
 
@@ -378,6 +410,12 @@ Shortage fields:
 | `shortage_refs` | Repeated string | No | Reference order numbers where shortage counting begins. |
 | `shortage_qtys` | Repeated string/integer | No | Available stock quantity after the reference order. |
 | `shortage_files` | Repeated file | No | Variant mapping files. Variants are read from Column F. |
+
+Status mapping fields:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `engine_status_file` | File | No | Engine/transmission status report. Column C order number maps to Column J engine status and Column L transmission status. |
 
 The frontend sends repeated fields in matching order. The backend processes entries up to:
 
@@ -452,7 +490,7 @@ Processing error:
 The main analysis function is:
 
 ```python
-analyze_sequence(df, shortages)
+analyze_sequence(df, shortages, engine_transmission_statuses=None)
 ```
 
 It returns:
@@ -462,6 +500,8 @@ It returns:
 - Skip order records.
 - Gap/anomaly block records.
 - Full preview columns and row data.
+
+When an engine/transmission status report is supplied, the backend maps those statuses by normalized order number and inserts `Engine status` and `Transmission status` into the preview data.
 
 ### Empty file behavior
 
@@ -582,10 +622,12 @@ Part shortage mapping lets the user estimate which vehicles are covered by remai
 
 For each shortage row, the user enters:
 
-- Part number
+- Variant mapping file
+- Part name
 - Reference order
 - Available quantity
-- Variant mapping file
+
+Part number is derived from the uploaded variant filename. The extension is removed and dots in the filename are ignored.
 
 The backend creates a `shortages` dictionary:
 
@@ -621,6 +663,8 @@ For rows where the main sequence variant is connected to the part:
 ### Preview columns
 
 Each shortage part becomes an inserted preview column. It is inserted after `Hold Status` when that column exists; otherwise, it is appended near the end of the preview.
+
+If an engine/transmission status report is uploaded, `Engine status` and `Transmission status` are inserted to the right of `Hold Status` before shortage columns.
 
 ### Frontend shortage heatmap
 
@@ -665,18 +709,23 @@ It includes:
 
 The main `App` component stores:
 
-- `selectedFile`: Main uploaded sequence file.
-- `dragActive`: Drag/drop UI state.
+- `reportFiles`: Opening and MOD uploaded sequence files.
+- `engineStatusFile`: Optional engine/transmission status report.
+- `dragActiveReport`: Drag/drop UI state for report cards.
 - `capacity`: Daily production capacity.
 - `startDate`: Production start date.
+- `lineType`: Current analyzer line, `HDT` or `MDT`.
 - `holidayInput`: Current holiday date input.
 - `holidays`: List of excluded dates.
 - `shortages`: User-entered shortage rows.
-- `analysis`: Normalized backend analysis result.
+- `analyses`: Normalized backend analysis results for Opening and MOD.
+- `activeReport`: Selected analytics view, Opening or MOD.
 - `reasonConfig`: Skip/hold reason and outlook annotations.
 - `showLanding`: Whether landing screen is visible.
 - `loading`: API request state.
 - `toasts`: User feedback notifications.
+
+The app also persists the workspace in IndexedDB using a separate key per line type. This persists files, mappings, annotations, analysis results, and active report view across refreshes.
 
 ### Key frontend functions
 
@@ -684,10 +733,11 @@ The main `App` component stores:
 | --- | --- |
 | `normalizeData` | Converts backend JSON into stable frontend field names. |
 | `createShortageRow` | Creates one editable shortage input row. |
-| `runAnalysis` | Builds `FormData`, calls `/api/analyze`, stores result. |
+| `runAnalysis` | Builds `FormData`, calls `/api/analyze` for each uploaded report, stores results. |
 | `applySequence` | Adds line sequence, production date, and line time to preview rows. |
 | `buildInference` | Builds shortage impact cards from sequenced preview data. |
 | `applySkipHoldReasons` | Inserts reason/outlook columns into preview data. |
+| `readWorkspace` / `writeWorkspace` / `clearWorkspace` | Persist and restore the browser workspace via IndexedDB. |
 | `triggerDownload` | Creates and downloads CSV files in the browser. |
 | `buildPieData` | Produces Chart.js pie data. |
 | `buildSimpleBarData` | Produces Chart.js bar data. |
@@ -742,7 +792,9 @@ Holiday dates use `YYYY-MM-DD` format.
 
 ### Capacity and takt time
 
-The frontend uses:
+The frontend uses different timing profiles for HDT and MDT.
+
+HDT uses:
 
 - Standard working minutes: `1070`
 - Thursday working minutes: `1010`
@@ -760,6 +812,18 @@ adjusted capacity = floor(capacity * 1010 / 1070)
 takt time = 1010 / adjusted capacity
 ```
 
+MDT uses a single-shift timing model:
+
+- Working window: `07:00` to `16:45`
+- Production minutes: `541`
+- Thursday uses the same minutes for now.
+
+For MDT:
+
+```text
+takt time = 541 / capacity
+```
+
 ### Shift start
 
 Each production day starts at:
@@ -770,7 +834,7 @@ Each production day starts at:
 
 ### Production breaks
 
-The current React frontend uses these break windows:
+HDT uses these break windows:
 
 | Break | Start | End |
 | --- | --- | --- |
@@ -780,6 +844,14 @@ The current React frontend uses these break windows:
 | Evening short break | 18:30 | 18:37 |
 | Dinner | 20:30 | 21:00 |
 | Midnight short break | 24:00 | 24:07 |
+
+MDT uses the day-shift breaks only:
+
+| Break | Start | End |
+| --- | --- | --- |
+| Morning short break | 09:30 | 09:37 |
+| Lunch | 11:30 | 12:00 |
+| Afternoon short break | 14:30 | 14:37 |
 
 The scheduling functions skip over breaks when assigning line-in-time values.
 
@@ -804,12 +876,18 @@ Chart tooltips include useful breakdown details where available.
 
 The UI includes:
 
+- Opening/MOD analytics view selector.
 - Out-of-sequence anomaly block table.
 - Skip orders table.
 - Hold orders table.
 - Full data preview table.
 
 The preview table includes all rows returned by the backend, derived backend columns, shortage columns, frontend scheduling columns, and optional reason/outlook fields.
+
+When available, preview data also includes:
+
+- `Engine status`
+- `Transmission status`
 
 ### Reason and outlook annotations
 
@@ -823,7 +901,7 @@ Annotations can be entered:
 
 Individual order values override group-level values.
 
-Annotations are frontend-only state. They are included in exported CSV data but are not persisted to the backend.
+Annotations are frontend-only state. They are included in exported CSV data and persisted in browser IndexedDB, but they are not written to the backend database or files.
 
 ### CSV exports
 
@@ -969,18 +1047,23 @@ There is no dedicated automated test suite currently checked into the repository
 Recommended manual validation:
 
 1. Start Flask and Vite.
-2. Upload a known-good main sequence file.
-3. Confirm total rows match the source file.
-4. Confirm hold count against rows where state is `HOLD`.
-5. Confirm skip count against known out-of-sequence `TRIM LINE` rows.
-6. Add a shortage file with known variants.
-7. Confirm covered rows and shortage rows match available quantity.
-8. Enter capacity and start date.
-9. Confirm scheduling starts at the first `TRIM LINE` row.
-10. Confirm Sundays and holidays are skipped.
-11. Download CSV files and inspect columns.
-12. Build frontend with `npm run build`.
-13. Confirm Flask serves the built React app from `http://127.0.0.1:5050`.
+2. Open HDT and MDT analyzer tabs.
+3. Upload a known-good opening sequence file.
+4. Confirm total rows match the source file.
+5. Confirm hold count against rows where state is `HOLD`.
+6. Confirm skip count against known out-of-sequence `TRIM LINE` rows.
+7. Add shortage files with known variants.
+8. Confirm derived part numbers ignore dots in filenames.
+9. Confirm covered rows and shortage rows match available quantity.
+10. Upload an engine/transmission status report and confirm statuses map by order number.
+11. Enter capacity and start date.
+12. Confirm scheduling starts at the first `TRIM LINE` row.
+13. Confirm Sundays and holidays are skipped.
+14. Upload a MOD report and confirm Opening/MOD analytics can be switched.
+15. Refresh the browser and confirm workspace inputs/files/analysis restore.
+16. Download CSV files and inspect columns.
+17. Build frontend with `npm run build`.
+18. Confirm Flask serves the built React app from `http://127.0.0.1:5050`.
 
 Recommended future automated tests:
 
@@ -1047,9 +1130,28 @@ Check:
 
 - The shortage file has variants in Column F.
 - Variant strings match the main report after trimming and uppercase conversion.
-- The part number is not blank.
+- The derived part number is not blank after removing the file extension and dots.
 - The shortage file was selected in the same row as the part number.
 - The reference order exists if you expect counting to begin at a specific point.
+
+### Engine/transmission statuses are blank
+
+Check:
+
+- The status report was uploaded in Step 3.
+- Order numbers are in Column C.
+- Engine status is in Column J.
+- Transmission status is in Column L.
+- The status report order number matches the main report after removing the two leading `00` characters.
+
+### Saved workspace does not restore
+
+The app stores workspace data in browser IndexedDB. Check:
+
+- You are using the same browser and URL origin.
+- Browser storage was not cleared.
+- Private/incognito mode is not discarding IndexedDB data.
+- You did not press `Reset`, which clears the current HDT/MDT workspace.
 
 ### React build is not served by Flask
 
@@ -1071,7 +1173,7 @@ This means `frontend/dist/index.html` is missing. Build the frontend or use the 
 - Keep backend response keys stable because the frontend normalizes specific names such as `hold_orders`, `skip_orders`, `preview_columns`, and `preview_data`.
 - Be cautious when changing serial-number parsing. Current business logic depends on the last five digits of `Serial Number`.
 - Be cautious when changing `Status == TRIM LINE`. This is the anchor for skip detection and frontend scheduling.
-- Reason/outlook annotation currently exists only in browser state. Add persistence before relying on it as a durable record.
+- Workspace state, including reason/outlook annotations and uploaded files, is persisted in browser IndexedDB per line type. It is durable across refreshes in the same browser, but it is not server-side storage.
 - The root `index.html` and React app overlap in responsibility. Prefer the React app for new development.
 - The checked-in `frontend/node-v24.15.0-win-x64` and `frontend/node.zip` are large runtime artifacts. Consider whether they should remain in source control.
 - Logs such as `server.err.log` and `server.out.log` are development artifacts. Consider ignoring them if they are not needed for audit/debug history.
@@ -1096,3 +1198,8 @@ This means `frontend/dist/index.html` is missing. Build the frontend or use the 
 | Connected Row | A row whose variant is listed in a shortage part's variant file. |
 | Covered | A connected row that is still covered by available stock quantity. |
 | Shortage | A connected row after available stock quantity has been exhausted. |
+| HDT | Heavy-duty truck analyzer mode. |
+| MDT | Medium-duty truck analyzer mode. |
+| Opening Report | Morning report used as the first analysis baseline. |
+| MOD Report | Mid-day updated report analyzed with the same mapped constraints. |
+| Engine/Transmission Status Report | Optional report that maps order number to engine and transmission status. |
