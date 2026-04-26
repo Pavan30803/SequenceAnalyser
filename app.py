@@ -2,7 +2,6 @@ from pathlib import Path
 
 from flask import Flask, request, jsonify, send_file
 import pandas as pd
-import numpy as np
 import io
 
 app = Flask(__name__)
