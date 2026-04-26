@@ -84,6 +84,20 @@ const PIE_SKIP_COLORS = ['#ffc145', '#3cb371', '#3c91e6', '#2ec4b6', '#7c4dff', 
 const REASON_COLUMN = 'Skip/hold reason'
 const OUTLOOK_COLUMN = 'Outlook'
 const LANDING_IMAGE_URL = 'https://www.bharatbenz.com/uploads/homebanner_images/large/BB-Construction.jpg'
+const LINE_TYPES = {
+  HDT: {
+    title: 'HDT',
+    description: 'Heavy-duty truck sequence timing',
+    standardMinutes: 1070,
+    thursdayMinutes: 1010,
+  },
+  MDT: {
+    title: 'MDT',
+    description: 'Medium-duty truck single-shift timing',
+    standardMinutes: 541,
+    thursdayMinutes: 541,
+  },
+}
 
 function createReasonBucket() {
   return {
@@ -109,13 +123,18 @@ function createReasonState() {
   }
 }
 
-function createShortageRow() {
+function getPartNumberFromFileName(fileName = '') {
+  return fileName.replace(/\.[^/.]+$/, '').trim()
+}
+
+function createShortageRow(file = null) {
   return {
     id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    part: '',
+    part: file ? getPartNumberFromFileName(file.name) : '',
+    partName: '',
     ref: '',
     qty: '',
-    file: null,
+    file,
   }
 }
 
@@ -159,6 +178,10 @@ function normalizeLookupValue(value) {
 }
 
 function normalizeLookupKey(value) {
+  return normalizeLookupValue(value).toUpperCase()
+}
+
+function normalizePartKey(value) {
   return normalizeLookupValue(value).toUpperCase()
 }
 
@@ -384,10 +407,13 @@ function formatLineTime(date) {
   return `${hours}:${minutes} ${meridiem}`
 }
 
-const PRODUCTION_BREAKS = [
+const DAY_SHIFT_BREAKS = [
   { start: 9 * 60 + 30, end: 9 * 60 + 37 },
   { start: 11 * 60 + 30, end: 12 * 60 },
   { start: 14 * 60 + 30, end: 14 * 60 + 37 },
+]
+const HDT_EXTENDED_SHIFT_BREAKS = [
+  ...DAY_SHIFT_BREAKS,
   { start: 18 * 60 + 30, end: 18 * 60 + 37 },
   { start: 20 * 60 + 30, end: 21 * 60 },
   { start: 24 * 60, end: 24 * 60 + 7 },
@@ -400,20 +426,21 @@ function createShiftTime(productionDate, minutesFromMidnight) {
   return date
 }
 
-function getBreakWindows(productionDate) {
-  return PRODUCTION_BREAKS.map((breakWindow) => ({
+function getBreakWindows(productionDate, lineType) {
+  const breaks = lineType === 'MDT' ? DAY_SHIFT_BREAKS : HDT_EXTENDED_SHIFT_BREAKS
+  return breaks.map((breakWindow) => ({
     start: createShiftTime(productionDate, breakWindow.start),
     end: createShiftTime(productionDate, breakWindow.end),
   }))
 }
 
-function skipProductionBreaks(date, productionDate) {
+function skipProductionBreaks(date, productionDate, lineType) {
   let adjustedDate = new Date(date)
   let moved = true
 
   while (moved) {
     moved = false
-    for (const breakWindow of getBreakWindows(productionDate)) {
+    for (const breakWindow of getBreakWindows(productionDate, lineType)) {
       if (adjustedDate >= breakWindow.start && adjustedDate < breakWindow.end) {
         adjustedDate = new Date(breakWindow.end)
         moved = true
@@ -425,12 +452,12 @@ function skipProductionBreaks(date, productionDate) {
   return adjustedDate
 }
 
-function addProductionMinutes(date, minutes, productionDate) {
-  let currentTime = skipProductionBreaks(date, productionDate)
+function addProductionMinutes(date, minutes, productionDate, lineType) {
+  let currentTime = skipProductionBreaks(date, productionDate, lineType)
   let remainingMinutes = minutes
 
   while (remainingMinutes > 0) {
-    const nextBreak = getBreakWindows(productionDate).find((breakWindow) => currentTime < breakWindow.end)
+    const nextBreak = getBreakWindows(productionDate, lineType).find((breakWindow) => currentTime < breakWindow.end)
     if (!nextBreak) {
       return new Date(currentTime.getTime() + remainingMinutes * 60000)
     }
@@ -442,17 +469,17 @@ function addProductionMinutes(date, minutes, productionDate) {
 
     const minutesUntilBreak = (nextBreak.start.getTime() - currentTime.getTime()) / 60000
     if (remainingMinutes <= minutesUntilBreak) {
-      return skipProductionBreaks(new Date(currentTime.getTime() + remainingMinutes * 60000), productionDate)
+      return skipProductionBreaks(new Date(currentTime.getTime() + remainingMinutes * 60000), productionDate, lineType)
     }
 
     remainingMinutes -= minutesUntilBreak
     currentTime = new Date(nextBreak.end)
   }
 
-  return skipProductionBreaks(currentTime, productionDate)
+  return skipProductionBreaks(currentTime, productionDate, lineType)
 }
 
-function applySequence(previewColumns, previewData, capacityValue, startDate, holidays) {
+function applySequence(previewColumns, previewData, capacityValue, startDate, holidays, lineType = 'HDT') {
   if (!Array.isArray(previewColumns) || !Array.isArray(previewData) || previewData.length === 0) {
     return {
       columns: previewColumns ?? [],
@@ -497,8 +524,9 @@ function applySequence(previewColumns, previewData, capacityValue, startDate, ho
   }
 
   const rows = structuredClone(previewData)
-  const standardTotalMinutes = 1070
-  const thursdayTotalMinutes = 1010
+  const lineConfig = LINE_TYPES[lineType] ?? LINE_TYPES.HDT
+  const standardTotalMinutes = lineConfig.standardMinutes
+  const thursdayTotalMinutes = lineConfig.thursdayMinutes
   let counter = 1
   let sequenceStarted = false
   let currentDayMinutes = standardTotalMinutes
@@ -532,12 +560,12 @@ function applySequence(previewColumns, previewData, capacityValue, startDate, ho
       currentTime.setHours(7, 0, 0, 0)
     }
 
-    currentTime = skipProductionBreaks(currentTime, currentDate)
+    currentTime = skipProductionBreaks(currentTime, currentDate, lineType)
     row['Line in sequence'] = counter
     row['Production Date'] = formatDateKey(currentDate)
     row['Line in time'] = formatLineTime(currentTime)
 
-    currentTime = addProductionMinutes(currentTime, taktTime, currentDate)
+    currentTime = addProductionMinutes(currentTime, taktTime, currentDate, lineType)
 
     counter += 1
     if (counter > todayCapacity) {
@@ -556,14 +584,16 @@ function applySequence(previewColumns, previewData, capacityValue, startDate, ho
   }
 }
 
-function buildInference(rows, shortageParts) {
+function buildInference(rows, shortageParts, shortagePartNames = {}) {
   if (!Array.isArray(shortageParts) || shortageParts.length === 0) {
     return []
   }
 
   const allDates = [...new Set(rows.map((row) => row['Production Date']).filter(Boolean))].sort()
+  const getPartName = (part) => shortagePartNames[part] ?? shortagePartNames[normalizePartKey(part)] ?? ''
 
   return shortageParts.map((part) => {
+    const partName = getPartName(part)
     const connectedRows = rows.filter((row) => row[part])
     const impactedRows = connectedRows.filter((row) => SHORTAGE_MARKERS.has(String(row[part])))
     const scheduledConnectedRows = connectedRows.filter((row) => row['Production Date'])
@@ -572,11 +602,14 @@ function buildInference(rows, shortageParts) {
     if (impactedRows.length === 0) {
       return {
         part,
+        partName,
         covered: true,
       }
     }
 
-    const shortageDate = scheduledImpactedRows[0]?.['Production Date'] ?? 'Not Scheduled'
+    const firstImpactedRow = scheduledImpactedRows[0]
+    const shortageDate = firstImpactedRow?.['Production Date'] ?? 'Not Scheduled'
+    const impactTime = firstImpactedRow?.['Line in time'] ?? 'Not Scheduled'
     const connectingModels = [...new Set(impactedRows.map((row) => row.Model || 'Unknown'))].join(', ')
     const firstDaySequences = scheduledImpactedRows
       .filter((row) => row['Production Date'] === shortageDate)
@@ -597,8 +630,10 @@ function buildInference(rows, shortageParts) {
 
     return {
       part,
+      partName,
       covered: false,
       shortageDate,
+      impactTime,
       connectingModels,
       firstDaySequences: firstDaySequences || 'None',
       forecast,
@@ -1041,12 +1076,14 @@ function OrderCell({ field, value, holdTable }) {
 
 function App() {
   const fileInputId = useId()
+  const shortageBatchInputId = useId()
   const shortageIntro =
-    'Map variant Excel files and provide reference order plus quantity to trace shortage impact through the sequence.'
+    'Upload variant Excel files, confirm the derived part number, and provide part name, reference order, and quantity for each shortage.'
   const [selectedFile, setSelectedFile] = useState(null)
   const [dragActive, setDragActive] = useState(false)
   const [capacity, setCapacity] = useState('')
   const [startDate, setStartDate] = useState('')
+  const [lineType, setLineType] = useState('HDT')
   const [holidayInput, setHolidayInput] = useState('')
   const [holidays, setHolidays] = useState([])
   const [shortages, setShortages] = useState([createShortageRow()])
@@ -1057,6 +1094,15 @@ function App() {
   const [toasts, setToasts] = useState([])
   const resultsRef = useRef(null)
   const toastCounterRef = useRef(0)
+  const shortagePartNames = shortages.reduce((partNames, shortage) => {
+    const part = shortage.part.trim()
+    const partName = shortage.partName.trim()
+    if (part) {
+      partNames[part] = partName
+      partNames[normalizePartKey(part)] = partName
+    }
+    return partNames
+  }, {})
 
   const sequencedPreview = applySequence(
     analysis?.previewColumns ?? [],
@@ -1064,10 +1110,11 @@ function App() {
     capacity,
     startDate,
     holidays,
+    lineType,
   )
   const previewWithReasons = applySkipHoldReasons(sequencedPreview, analysis, reasonConfig)
   const deferredPreviewRows = useDeferredValue(previewWithReasons.rows)
-  const inferenceCards = buildInference(sequencedPreview.rows, analysis?.summary?.shortage_parts ?? [])
+  const inferenceCards = buildInference(sequencedPreview.rows, analysis?.summary?.shortage_parts ?? [], shortagePartNames)
 
   useEffect(() => {
     if (!analysis || !resultsRef.current) {
@@ -1099,6 +1146,25 @@ function App() {
     setShortages((current) => [...current, createShortageRow()])
   }
 
+  function addShortageFiles(fileList) {
+    const files = Array.from(fileList ?? [])
+    if (files.length === 0) {
+      return
+    }
+
+    setShortages((current) => {
+      const existingRows = current.filter((row) => row.file || row.partName || row.ref || row.qty)
+      return [...existingRows, ...files.map((file) => createShortageRow(file))]
+    })
+  }
+
+  function updateShortageFile(id, file) {
+    updateShortage(id, {
+      file,
+      part: file ? getPartNumberFromFileName(file.name) : '',
+    })
+  }
+
   function removeShortage(id) {
     setShortages((current) => {
       if (current.length === 1) {
@@ -1125,6 +1191,7 @@ function App() {
     setDragActive(false)
     setCapacity('')
     setStartDate('')
+    setLineType('HDT')
     setHolidayInput('')
     setHolidays([])
     setShortages([createShortageRow()])
@@ -1310,6 +1377,27 @@ function App() {
       </header>
 
       <main className="container-fluid px-3 px-xl-4 pb-5">
+        <section className="line-type-panel" aria-label="Vehicle line selector">
+          <div>
+            <span className="line-type-kicker">Select line</span>
+            <h2>{LINE_TYPES[lineType].title} Sequence Analyser</h2>
+            <p>{LINE_TYPES[lineType].description}</p>
+          </div>
+          <div className="line-type-actions" role="group" aria-label="Select HDT or MDT">
+            {Object.keys(LINE_TYPES).map((type) => (
+              <button
+                key={type}
+                type="button"
+                className={`line-type-button ${lineType === type ? 'active' : ''}`}
+                onClick={() => setLineType(type)}
+                aria-pressed={lineType === type}
+              >
+                {type}
+              </button>
+            ))}
+          </div>
+        </section>
+
         <section className="row g-4 mt-1">
           <div className="col-xl-4">
             <div className="step-card h-100">
@@ -1390,21 +1478,47 @@ function App() {
                   <i className="bi bi-2-circle-fill" /> Step 2: Part shortages
                 </span>
                 <button className="btn btn-sm btn-outline-primary" type="button" onClick={addShortage}>
-                  <i className="bi bi-plus" /> Add Part
+                  <i className="bi bi-plus" /> Add Row
                 </button>
               </div>
               <div className="step-body shortage-stack">
                 <p className="step-copy">{shortageIntro}</p>
+                <label htmlFor={shortageBatchInputId} className="multi-upload-zone">
+                  <i className="bi bi-files" />
+                  <span>Upload one or more variant files</span>
+                </label>
+                <input
+                  id={shortageBatchInputId}
+                  type="file"
+                  accept=".xlsx,.xls,.csv"
+                  multiple
+                  className="visually-hidden"
+                  onChange={(event) => {
+                    addShortageFiles(event.target.files)
+                    event.target.value = ''
+                  }}
+                />
                 {shortages.map((shortage) => (
                   <div key={shortage.id} className="shortage-card">
                     <div className="row g-2">
                       <div className="col-sm-6">
-                        <label className="form-label small fw-semibold">Part No.</label>
+                        <label className="form-label small fw-semibold">Part No. from file</label>
                         <input
                           type="text"
                           className="form-control form-control-sm"
                           value={shortage.part}
-                          onChange={(event) => updateShortage(shortage.id, { part: event.target.value })}
+                          placeholder="Upload a file"
+                          readOnly
+                        />
+                      </div>
+                      <div className="col-sm-6">
+                        <label className="form-label small fw-semibold">Part Name</label>
+                        <input
+                          type="text"
+                          className="form-control form-control-sm"
+                          value={shortage.partName}
+                          placeholder="Enter part name"
+                          onChange={(event) => updateShortage(shortage.id, { partName: event.target.value })}
                         />
                       </div>
                       <div className="col-sm-6">
@@ -1432,7 +1546,7 @@ function App() {
                           type="file"
                           accept=".xlsx,.xls,.csv"
                           className="form-control form-control-sm"
-                          onChange={(event) => updateShortage(shortage.id, { file: event.target.files?.[0] ?? null })}
+                          onChange={(event) => updateShortageFile(shortage.id, event.target.files?.[0] ?? null)}
                         />
                       </div>
                     </div>
@@ -1752,18 +1866,27 @@ function App() {
                   {inferenceCards.map((card) => (
                     <div key={card.part} className="col-lg-6">
                       <div className={`inference-card ${card.covered ? 'inference-covered' : ''}`}>
-                        <h6>{card.part}</h6>
+                        <h6>
+                          {card.part}
+                          {card.partName ? <span>{card.partName}</span> : null}
+                        </h6>
                         {card.covered ? (
-                          <p className="text-success fw-semibold mb-0">
-                            <i className="bi bi-check-circle-fill me-1" />
-                            Stock completely covers the current production sequence.
-                          </p>
+                          <>
+                            <p className="text-success fw-semibold mb-0">
+                              <i className="bi bi-check-circle-fill me-1" />
+                              Stock completely covers the current production sequence.
+                            </p>
+                          </>
                         ) : (
                           <>
                             <div className="inference-grid">
                               <div>
                                 <span className="detail-label">First Shortage Date</span>
                                 <strong>{card.shortageDate}</strong>
+                              </div>
+                              <div>
+                                <span className="detail-label">Time of Impact</span>
+                                <strong>{card.impactTime}</strong>
                               </div>
                               <div>
                                 <span className="detail-label">Sequence Numbers</span>
