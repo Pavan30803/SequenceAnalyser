@@ -336,6 +336,11 @@
   padding: 1rem;
 }
 
+.engine-status-upload {
+  min-height: 8rem;
+  margin-top: 0.85rem;
+}
+
 .upload-zone:hover,
 .upload-zone.drag-active,
 .report-upload-card:hover,

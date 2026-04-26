@@ -1160,6 +1160,7 @@ function App() {
   const shortageIntro =
     'Upload variant Excel files, confirm the derived part number, and provide part name, reference order, and quantity for each shortage.'
   const [reportFiles, setReportFiles] = useState({ opening: null, mod: null })
+  const [engineStatusFile, setEngineStatusFile] = useState(null)
   const [dragActiveReport, setDragActiveReport] = useState(null)
   const [capacity, setCapacity] = useState('')
   const [startDate, setStartDate] = useState('')
@@ -1219,6 +1220,7 @@ function App() {
 
         if (workspace) {
           setReportFiles(workspace.reportFiles ?? { opening: null, mod: null })
+          setEngineStatusFile(workspace.engineStatusFile ?? null)
           setCapacity(workspace.capacity ?? '')
           setStartDate(workspace.startDate ?? '')
           setHolidayInput(workspace.holidayInput ?? '')
@@ -1252,6 +1254,7 @@ function App() {
     workspaceSaveTimerRef.current = window.setTimeout(() => {
       writeWorkspace(lineType, {
         reportFiles,
+        engineStatusFile,
         capacity,
         startDate,
         holidayInput,
@@ -1269,7 +1272,7 @@ function App() {
     return () => {
       window.clearTimeout(workspaceSaveTimerRef.current)
     }
-  }, [lineType, reportFiles, capacity, startDate, holidayInput, holidays, shortages, analyses, activeReport, reasonConfig])
+  }, [lineType, reportFiles, engineStatusFile, capacity, startDate, holidayInput, holidays, shortages, analyses, activeReport, reasonConfig])
 
   function pushToast(message, type = 'danger') {
     toastCounterRef.current += 1
@@ -1353,6 +1356,7 @@ function App() {
       pushToast('Saved workspace could not be cleared in this browser.', 'warning')
     })
     setReportFiles({ opening: null, mod: null })
+    setEngineStatusFile(null)
     setDragActiveReport(null)
     setCapacity('')
     setStartDate('')
@@ -1446,6 +1450,9 @@ function App() {
   function buildAnalysisFormData(file) {
     const formData = new FormData()
     formData.append('file', file)
+    if (engineStatusFile) {
+      formData.append('engine_status_file', engineStatusFile)
+    }
 
     for (const shortage of shortages) {
       if (shortage.part.trim() && shortage.file) {
@@ -1798,6 +1805,36 @@ function App() {
                     )
                   })}
                 </div>
+
+                <label
+                  htmlFor={`${fileInputId}-engine-status`}
+                  className={`report-upload-card engine-status-upload ${dragActiveReport === 'engine-status' ? 'drag-active' : ''}`}
+                  onDragOver={(event) => {
+                    event.preventDefault()
+                    setDragActiveReport('engine-status')
+                  }}
+                  onDragLeave={() => setDragActiveReport(null)}
+                  onDrop={(event) => {
+                    event.preventDefault()
+                    setDragActiveReport(null)
+                    const file = event.dataTransfer.files?.[0]
+                    if (file) {
+                      setEngineStatusFile(file)
+                    }
+                  }}
+                >
+                  <i className="bi bi-gear-wide-connected upload-icon" />
+                  <span className="upload-title">Engine &amp; Transmission Status Report</span>
+                  <span className="upload-copy">Maps Column C order number to Column J engine and Column L transmission status.</span>
+                  <strong className="upload-file">{engineStatusFile?.name || 'No status report selected'}</strong>
+                </label>
+                <input
+                  id={`${fileInputId}-engine-status`}
+                  type="file"
+                  accept=".xlsx,.xls,.csv"
+                  className="d-none"
+                  onChange={(event) => setEngineStatusFile(event.target.files?.[0] ?? null)}
+                />
 
                 <div className="action-row">
                   <button className="btn btn-outline-secondary btn-sm px-3" type="button" onClick={resetAll}>
