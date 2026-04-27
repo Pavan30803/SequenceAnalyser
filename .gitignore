@@ -1,0 +1,13 @@
+.vercel
+.venv/
+__pycache__/
+*.pyc
+server.err.log
+server.out.log
+frontend/vite.err.log
+frontend/vite.out.log
+.vercel_python_packages/
+vercel-deploy.err.log
+vercel-deploy.out.log
+
+.vercel
