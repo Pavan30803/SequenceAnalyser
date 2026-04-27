@@ -28,15 +28,19 @@ def parse_excel(file_bytes):
     return df
 
 def normalize_order_key(value):
-    text = str(value).replace('.0', '').strip()
+    text = str(value).strip()
     if not text or text.lower() == 'nan':
         return ''
-    if text.startswith('00'):
-        text = text[2:]
-    return text
+    text = text.replace('\u00a0', '').replace(' ', '')
+    if text.endswith('.0'):
+        text = text[:-2]
+    digits = ''.join(ch for ch in text if ch.isdigit())
+    return digits[-6:] if len(digits) >= 6 else digits
 
 
-def analyze_sequence(df, shortages, engine_transmission_statuses=None):
+def analyze_sequence(df, shortages, engine_transmission_statuses=None, opening_hold_keys=None):
+    opening_hold_keys = {normalize_order_key(key) for key in (opening_hold_keys or []) if normalize_order_key(key)}
+
     if df.empty:
         return {
             'summary': { 
@@ -82,6 +86,23 @@ def analyze_sequence(df, shortages, engine_transmission_statuses=None):
     if not serial_col or not state_col:
         raise ValueError("Required columns (Column D, Column I, or Column J) could not be found in the uploaded file.")
 
+    def get_vehicle_key(row):
+        if order_col:
+            order_key = normalize_order_key(row.get(order_col, ''))
+            if order_key:
+                return order_key
+        serial_key = normalize_order_key(row.get(serial_col, '')) if serial_col else ''
+        if serial_key:
+            return serial_key
+        return normalize_order_key(row.get(dsn_col, '')) if dsn_col else ''
+
+    def is_released_hold_row(row):
+        if not opening_hold_keys:
+            return False
+        vehicle_key = get_vehicle_key(row)
+        current_state = str(row.get(state_col, '')).strip().upper()
+        return bool(vehicle_key and vehicle_key in opening_hold_keys and current_state != 'HOLD')
+
     extra_cols = ['Order Number', 'Hold Status', 'Vehicle Start Time', 'Country']
     extra_cols = [c for c in extra_cols if c in original_df.columns]
 
@@ -118,6 +139,12 @@ def analyze_sequence(df, shortages, engine_transmission_statuses=None):
             return 'Domestic'
         return 'Export'
 
+    def get_engine_status_fallback(variant_val):
+        variant_str = str(variant_val).strip().upper()
+        if len(variant_str) >= 11 and variant_str[10] in ['U', 'T']:
+            return 'Rapid Prime'
+        return ''
+
     # Insert Data Columns into original_df
     original_df['Model'] = original_df[desc_col].apply(extract_model)
     original_df['Work Content'] = original_df.apply(lambda row: get_work_content(row.get(variant_col, ''), row.get(desc_col, '')), axis=1)
@@ -143,13 +170,14 @@ def analyze_sequence(df, shortages, engine_transmission_statuses=None):
     # =========================================================
     # ENGINE & TRANSMISSION STATUS MAPPING
     # =========================================================
+    has_engine_transmission_report = engine_transmission_statuses is not None
     engine_transmission_statuses = engine_transmission_statuses or {}
     status_insert_idx = len(original_df.columns)
     hold_status_col = next((c for c in original_df.columns if str(c).strip().upper() == 'HOLD STATUS'), None)
     if hold_status_col:
         status_insert_idx = list(original_df.columns).index(hold_status_col) + 1
 
-    if engine_transmission_statuses:
+    if has_engine_transmission_report:
         order_lookup_col = order_col
         if not order_lookup_col and len(original_df.columns) > 2:
             order_lookup_col = original_df.columns[2]
@@ -159,7 +187,10 @@ def analyze_sequence(df, shortages, engine_transmission_statuses=None):
         for _, row in original_df.iterrows():
             order_key = normalize_order_key(row.get(order_lookup_col, '')) if order_lookup_col else ''
             mapped_status = engine_transmission_statuses.get(order_key, {})
-            engine_values.append(mapped_status.get('engine_status', ''))
+            engine_status = mapped_status.get('engine_status', '')
+            if not engine_status:
+                engine_status = get_engine_status_fallback(row.get(variant_col, '')) if variant_col else ''
+            engine_values.append(engine_status)
             transmission_values.append(mapped_status.get('transmission_status', ''))
 
         original_df.insert(status_insert_idx, 'Engine status', engine_values)
@@ -183,6 +214,7 @@ def analyze_sequence(df, shortages, engine_transmission_statuses=None):
         var_set = details['variants']
         ref_order = details['ref_order']
         qty = details['qty']
+        usage = max(int(details.get('usage', 1) or 1), 1)
         
         start_idx = 0
         if order_col and ref_order:
@@ -197,9 +229,9 @@ def analyze_sequence(df, shortages, engine_transmission_statuses=None):
                 if i < start_idx:
                     col_data[i] = 'Covered'
                 else:
-                    if qty > 0:
+                    if qty >= usage:
                         col_data[i] = 'Covered'
-                        qty -= 1
+                        qty -= usage
                     else:
                         col_data[i] = '⚠️ SHORTAGE'
         
@@ -264,6 +296,7 @@ def analyze_sequence(df, shortages, engine_transmission_statuses=None):
             continue
 
         expected_next = last_valid_seq + 1
+        released_hold_row = is_released_hold_row(row)
 
         if current_seq == expected_next:
             last_valid_seq = current_seq
@@ -283,6 +316,9 @@ def analyze_sequence(df, shortages, engine_transmission_statuses=None):
                 current_anomaly_group = []
                 is_in_anomaly_block = False
         else:
+            if released_hold_row:
+                continue
+
             if is_in_anomaly_block:
                 current_anomaly_group.append(row)
                 if status_val == 'TRIM LINE':
@@ -417,8 +453,10 @@ def analyze():
     shortage_parts = request.form.getlist('shortage_parts')
     shortage_refs = request.form.getlist('shortage_refs')
     shortage_qtys = request.form.getlist('shortage_qtys')
+    shortage_usages = request.form.getlist('shortage_usages')
     shortage_files = request.files.getlist('shortage_files')
     engine_status_file = request.files.get('engine_status_file')
+    opening_hold_keys = request.form.getlist('opening_hold_keys')
     
     shortages = {}
     for i in range(min(len(shortage_parts), len(shortage_files))):
@@ -428,6 +466,11 @@ def analyze():
             qty = int(shortage_qtys[i].strip())
         except:
             qty = 0
+        try:
+            usage = int(shortage_usages[i].strip()) if i < len(shortage_usages) else 1
+        except:
+            usage = 1
+        usage = max(usage, 1)
             
         file_obj = shortage_files[i]
         
@@ -440,13 +483,15 @@ def analyze():
                     shortages[part_num] = {
                         'variants': set(variants),
                         'ref_order': ref_order,
-                        'qty': qty
+                        'qty': qty,
+                        'usage': usage
                     }
             except Exception as e:
                 print(f"Error parsing shortage file for {part_num}: {e}")
 
-    engine_transmission_statuses = {}
+    engine_transmission_statuses = None
     if engine_status_file and engine_status_file.filename:
+        engine_transmission_statuses = {}
         try:
             df_status = parse_excel(engine_status_file.read())
             if len(df_status.columns) > 11:
@@ -466,7 +511,7 @@ def analyze():
 
     try:
         df = parse_excel(f.read())
-        result = analyze_sequence(df, shortages, engine_transmission_statuses)
+        result = analyze_sequence(df, shortages, engine_transmission_statuses, opening_hold_keys)
         return jsonify(result)
     except Exception as e:
         print(f"Server Error during analysis: {str(e)}")

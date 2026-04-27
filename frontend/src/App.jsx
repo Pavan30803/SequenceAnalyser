@@ -83,6 +83,7 @@ const PIE_HOLD_COLORS = ['#d9485f', '#f08949', '#ef7d95', '#5f50cf', '#15938f', 
 const PIE_SKIP_COLORS = ['#ffc145', '#3cb371', '#3c91e6', '#2ec4b6', '#7c4dff', '#ef476f', '#ff8c42', '#9aa8bc']
 const REASON_COLUMN = 'Skip/hold reason'
 const OUTLOOK_COLUMN = 'Outlook'
+const SEQUENCE_COLUMNS = ['Line in sequence', 'Production Date', 'Line in time']
 const LANDING_IMAGE_URL = 'https://www.bharatbenz.com/uploads/homebanner_images/large/BB-Construction.jpg'
 const LINE_TYPES = {
   HDT: {
@@ -90,12 +91,14 @@ const LINE_TYPES = {
     description: 'Heavy-duty truck sequence timing',
     standardMinutes: 1070,
     thursdayMinutes: 1010,
+    shiftEndMinute: 26 * 60 + 20,
   },
   MDT: {
     title: 'MDT',
     description: 'Medium-duty truck single-shift timing',
     standardMinutes: 541,
     thursdayMinutes: 541,
+    shiftEndMinute: 16 * 60 + 45,
   },
 }
 const REPORT_TYPES = {
@@ -214,6 +217,7 @@ function createShortageRow(file = null) {
     partName: '',
     ref: '',
     qty: '',
+    usage: '1',
     file,
   }
 }
@@ -269,6 +273,12 @@ function normalizeOrderKey(value) {
   return normalizeLookupValue(value).replace(/\.0$/, '').toUpperCase()
 }
 
+function normalizeVehicleKey(value) {
+  const text = normalizeLookupValue(value).replace(/\.0$/, '')
+  const digits = text.replace(/\D/g, '')
+  return digits.length >= 6 ? digits.slice(-6) : text.toUpperCase()
+}
+
 function getOrderKey(row, fallback = '') {
   return (
     normalizeOrderKey(row?.serial) ||
@@ -294,6 +304,94 @@ function getPreviewOrderKey(row) {
     normalizeOrderKey(getPreviewValue(row, ['DSN', 'Delivery Sequence Number', 'DELIVERY SEQUENCE NUMBER', 'dsn'])) ||
     normalizeOrderKey(getPreviewValue(row, ['Order Number', 'ORDER NUMBER', 'Order No', 'order_number']))
   )
+}
+
+function getPreviewVehicleKey(row) {
+  const orderNumber = getPreviewValue(row, ['Order Number', 'ORDER NUMBER', 'Order No', 'order_number'])
+  const orderKey = normalizeVehicleKey(orderNumber)
+  if (orderKey) {
+    return orderKey
+  }
+
+  return normalizeVehicleKey(getPreviewValue(row, ['Serial Number', 'SERIAL NUMBER', 'Serial', 'serial'])) ||
+    normalizeVehicleKey(getPreviewValue(row, ['DSN', 'Delivery Sequence Number', 'DELIVERY SEQUENCE NUMBER', 'dsn']))
+}
+
+function getVehicleKeyCandidates(row) {
+  return [
+    row?.order_number,
+    row?.['Order Number'],
+    row?.['ORDER NUMBER'],
+    row?.serial,
+    row?.['Serial Number'],
+    row?.['SERIAL NUMBER'],
+    row?.dsn,
+    row?.DSN,
+    row?.['Delivery Sequence Number'],
+  ]
+    .map(normalizeVehicleKey)
+    .filter(Boolean)
+}
+
+function buildVehicleKeySet(rows = []) {
+  const keys = new Set()
+  for (const row of rows) {
+    for (const key of getVehicleKeyCandidates(row)) {
+      keys.add(key)
+    }
+  }
+  return keys
+}
+
+function getPreviewOrderState(row) {
+  return normalizeLookupKey(getPreviewValue(row, ['Vehicle Order State', 'VEHICLE ORDER STATE', 'Vehicle order state', 'State', 'state']))
+}
+
+function buildReleasedHoldKeys(openingRows = [], modRows = []) {
+  const openingHoldKeys = buildOpeningHoldKeys(openingRows)
+
+  const releasedKeys = new Set()
+  for (const row of modRows) {
+    const key = getPreviewVehicleKey(row)
+    const state = getPreviewOrderState(row)
+    if (key && openingHoldKeys.has(key) && state && state !== 'HOLD') {
+      releasedKeys.add(key)
+    }
+  }
+
+  return releasedKeys
+}
+
+function buildOpeningHoldKeys(openingRows = []) {
+  const openingHoldKeys = new Set()
+
+  for (const row of openingRows) {
+    if (getPreviewOrderState(row) === 'HOLD') {
+      const key = getPreviewVehicleKey(row)
+      if (key) {
+        openingHoldKeys.add(key)
+      }
+    }
+  }
+
+  return openingHoldKeys
+}
+
+function buildSequenceBaseline(rows = []) {
+  const baseline = new Map()
+
+  for (const row of rows) {
+    const key = getPreviewVehicleKey(row)
+    const lineSequence = row?.['Line in sequence']
+    const productionDate = row?.['Production Date']
+    const lineTime = row?.['Line in time']
+
+    if (key && lineSequence !== '' && lineSequence !== undefined && productionDate && lineTime && !baseline.has(key)) {
+      baseline.set(key, { lineSequence, productionDate, lineTime })
+    }
+  }
+
+  return baseline
 }
 
 function getGroupValue(row, groupBy) {
@@ -372,7 +470,7 @@ function buildOrderLookup(rows) {
 
 function getPreviewReason(row, reasonConfig, lookups) {
   const key = getPreviewOrderKey(row)
-  const state = normalizeLookupKey(getPreviewValue(row, ['Vehicle Order State', 'VEHICLE ORDER STATE', 'State', 'state']))
+  const state = getPreviewOrderState(row)
   const status = normalizeLookupKey(getPreviewValue(row, ['Status', 'STATUS', 'status']))
   const holdOrder = key ? lookups.hold.get(key) : null
   const skipOrder = key ? lookups.skip.get(key) : null
@@ -401,7 +499,7 @@ function getPreviewReason(row, reasonConfig, lookups) {
 
 function getPreviewOutlook(row, reasonConfig, lookups) {
   const key = getPreviewOrderKey(row)
-  const state = normalizeLookupKey(getPreviewValue(row, ['Vehicle Order State', 'VEHICLE ORDER STATE', 'State', 'state']))
+  const state = getPreviewOrderState(row)
   const status = normalizeLookupKey(getPreviewValue(row, ['Status', 'STATUS', 'status']))
   const holdOrder = key ? lookups.hold.get(key) : null
   const skipOrder = key ? lookups.skip.get(key) : null
@@ -428,7 +526,7 @@ function getPreviewOutlook(row, reasonConfig, lookups) {
   return ''
 }
 
-function applySkipHoldReasons(sequencedPreview, analysis, reasonConfig) {
+function applySkipHoldReasons(sequencedPreview, analysis, reasonConfig, releasedHoldKeys = new Set()) {
   const baseColumns = sequencedPreview.columns.filter((column) => ![REASON_COLUMN, OUTLOOK_COLUMN].includes(column))
   const columns = [...baseColumns]
   const statusIndex = columns.indexOf('Status')
@@ -448,11 +546,16 @@ function applySkipHoldReasons(sequencedPreview, analysis, reasonConfig) {
     hold: buildOrderLookup(analysis.holdOrders ?? []),
     skip: buildOrderLookup(analysis.skipOrders ?? []),
   }
-  const rows = sequencedPreview.rows.map((row) => ({
-    ...row,
-    [REASON_COLUMN]: getPreviewReason(row, reasonConfig, lookups),
-    [OUTLOOK_COLUMN]: formatOutlookValue(getPreviewOutlook(row, reasonConfig, lookups)),
-  }))
+  const rows = sequencedPreview.rows.map((row) => {
+    const key = getPreviewVehicleKey(row)
+    const wasReleasedFromHold = key && releasedHoldKeys.has(key)
+
+    return {
+      ...row,
+      [REASON_COLUMN]: wasReleasedFromHold ? 'Released' : getPreviewReason(row, reasonConfig, lookups),
+      [OUTLOOK_COLUMN]: formatOutlookValue(getPreviewOutlook(row, reasonConfig, lookups)),
+    }
+  })
 
   return {
     ...sequencedPreview,
@@ -504,6 +607,70 @@ function createShiftTime(productionDate, minutesFromMidnight) {
   date.setHours(0, 0, 0, 0)
   date.setMinutes(minutesFromMidnight)
   return date
+}
+
+function getShiftStartTime(productionDate) {
+  return createShiftTime(productionDate, 7 * 60)
+}
+
+function getShiftEndTime(productionDate, lineType) {
+  const lineConfig = LINE_TYPES[lineType] ?? LINE_TYPES.HDT
+  return createShiftTime(productionDate, lineConfig.shiftEndMinute)
+}
+
+function getProductionDateFromTimestamp(timestamp, lineType) {
+  const uploadTime = new Date(timestamp)
+  if (Number.isNaN(uploadTime.getTime())) {
+    return null
+  }
+
+  const productionDate = new Date(uploadTime)
+  productionDate.setHours(0, 0, 0, 0)
+  const minutesFromMidnight = uploadTime.getHours() * 60 + uploadTime.getMinutes()
+  const lineConfig = LINE_TYPES[lineType] ?? LINE_TYPES.HDT
+
+  if (lineConfig.shiftEndMinute > 24 * 60 && minutesFromMidnight < lineConfig.shiftEndMinute - 24 * 60) {
+    productionDate.setDate(productionDate.getDate() - 1)
+  }
+
+  return productionDate
+}
+
+function getModStartTime(uploadedAt, holidays, lineType) {
+  const uploadTime = new Date(uploadedAt)
+  if (Number.isNaN(uploadTime.getTime())) {
+    return null
+  }
+
+  let productionDate = getProductionDateFromTimestamp(uploadTime, lineType)
+  if (!productionDate) {
+    return null
+  }
+
+  let currentTime = new Date(uploadTime)
+  let shiftStart = getShiftStartTime(productionDate)
+  let shiftEnd = getShiftEndTime(productionDate, lineType)
+
+  if (currentTime < shiftStart) {
+    currentTime = new Date(shiftStart)
+  }
+
+  if (currentTime >= shiftEnd) {
+    productionDate.setDate(productionDate.getDate() + 1)
+    productionDate = getNextWorkingDay(productionDate, holidays)
+    shiftStart = getShiftStartTime(productionDate)
+    shiftEnd = getShiftEndTime(productionDate, lineType)
+    currentTime = new Date(shiftStart)
+  }
+
+  currentTime = skipProductionBreaks(currentTime, productionDate, lineType)
+  if (currentTime >= shiftEnd) {
+    productionDate.setDate(productionDate.getDate() + 1)
+    productionDate = getNextWorkingDay(productionDate, holidays)
+    currentTime = getShiftStartTime(productionDate)
+  }
+
+  return { productionDate, currentTime }
 }
 
 function getBreakWindows(productionDate, lineType) {
@@ -559,7 +726,18 @@ function addProductionMinutes(date, minutes, productionDate, lineType) {
   return skipProductionBreaks(currentTime, productionDate, lineType)
 }
 
-function applySequence(previewColumns, previewData, capacityValue, startDate, holidays, lineType = 'HDT') {
+function applySequence(
+  previewColumns,
+  previewData,
+  capacityValue,
+  startDate,
+  holidays,
+  lineType = 'HDT',
+  baselineRows = [],
+  modUploadedAt = null,
+  modStartSequence = '',
+  modSkipKeys = new Set(),
+) {
   if (!Array.isArray(previewColumns) || !Array.isArray(previewData) || previewData.length === 0) {
     return {
       columns: previewColumns ?? [],
@@ -593,20 +771,20 @@ function applySequence(previewColumns, previewData, capacityValue, startDate, ho
 
   const [year, month, day] = startDate.split('-').map((value) => Number.parseInt(value, 10))
   let currentDate = getNextWorkingDay(new Date(year, month - 1, day), holidays)
-  const sequenceColumns = ['Line in sequence', 'Production Date', 'Line in time']
   const columns = [...previewColumns]
   const statusIndex = columns.indexOf('Status')
 
   if (statusIndex === -1) {
-    columns.unshift(...sequenceColumns)
+    columns.unshift(...SEQUENCE_COLUMNS)
   } else {
-    columns.splice(statusIndex + 1, 0, ...sequenceColumns)
+    columns.splice(statusIndex + 1, 0, ...SEQUENCE_COLUMNS)
   }
 
   const rows = structuredClone(previewData)
   const lineConfig = LINE_TYPES[lineType] ?? LINE_TYPES.HDT
   const standardTotalMinutes = lineConfig.standardMinutes
   const thursdayTotalMinutes = lineConfig.thursdayMinutes
+  const baseline = buildSequenceBaseline(baselineRows)
   let counter = 1
   let sequenceStarted = false
   let currentDayMinutes = standardTotalMinutes
@@ -614,6 +792,97 @@ function applySequence(previewColumns, previewData, capacityValue, startDate, ho
   let taktTime = currentDayMinutes / todayCapacity
   let currentTime = new Date(currentDate)
   currentTime.setHours(7, 0, 0, 0)
+
+  if (baseline.size > 0 && modUploadedAt) {
+    const firstTrimIndex = rows.findIndex((row) => {
+      const status = String(row.Status ?? '').trim().toUpperCase()
+      return status === 'TRIM LINE' && !modSkipKeys.has(getPreviewVehicleKey(row))
+    })
+    const modStart = getModStartTime(modUploadedAt, holidays, lineType)
+    const anchoredSequence = Number.parseInt(modStartSequence, 10)
+
+    rows.forEach((row) => {
+      row['Line in sequence'] = ''
+      row['Production Date'] = ''
+      row['Line in time'] = ''
+    })
+
+    if (firstTrimIndex === -1 || !modStart || !Number.isFinite(anchoredSequence) || anchoredSequence <= 0) {
+      return {
+        columns,
+        rows,
+        statusLabel:
+          firstTrimIndex === -1
+            ? 'MOD schedule unavailable (no non-skip TRIM LINE vehicle)'
+            : !modStart
+              ? 'MOD schedule unavailable (missing upload time)'
+              : 'MOD schedule unavailable (enter MOD start sequence)',
+        statusTone: 'warning',
+        taktTime: Number.isFinite(taktTime) ? taktTime.toFixed(2) : null,
+      }
+    }
+
+    let counter = anchoredSequence
+    let currentDate = new Date(modStart.productionDate)
+    let currentTime = new Date(modStart.currentTime)
+    let isModStartDay = true
+
+    for (let index = firstTrimIndex; index < rows.length; index += 1) {
+      const row = rows[index]
+      currentDayMinutes = currentDate.getDay() === 4 ? thursdayTotalMinutes : standardTotalMinutes
+      todayCapacity =
+        currentDate.getDay() === 4
+          ? Math.floor(baseCapacity * (thursdayTotalMinutes / standardTotalMinutes))
+          : baseCapacity
+      taktTime = currentDayMinutes / todayCapacity
+
+      if (!isModStartDay && counter > todayCapacity) {
+        counter = 1
+        currentDate.setDate(currentDate.getDate() + 1)
+        currentDate = getNextWorkingDay(currentDate, holidays)
+        currentTime = getShiftStartTime(currentDate)
+        currentDayMinutes = currentDate.getDay() === 4 ? thursdayTotalMinutes : standardTotalMinutes
+        todayCapacity =
+          currentDate.getDay() === 4
+            ? Math.floor(baseCapacity * (thursdayTotalMinutes / standardTotalMinutes))
+            : baseCapacity
+        taktTime = currentDayMinutes / todayCapacity
+      }
+
+      const shiftEnd = getShiftEndTime(currentDate, lineType)
+      currentTime = skipProductionBreaks(currentTime, currentDate, lineType)
+      if (currentTime >= shiftEnd) {
+        counter = 1
+        currentDate.setDate(currentDate.getDate() + 1)
+        currentDate = getNextWorkingDay(currentDate, holidays)
+        currentTime = getShiftStartTime(currentDate)
+        isModStartDay = false
+      }
+
+      row['Line in sequence'] = counter
+      row['Production Date'] = formatDateKey(currentDate)
+      row['Line in time'] = formatLineTime(currentTime)
+
+      currentTime = addProductionMinutes(currentTime, taktTime, currentDate, lineType)
+      counter += 1
+
+      if (currentTime >= getShiftEndTime(currentDate, lineType)) {
+        counter = 1
+        currentDate.setDate(currentDate.getDate() + 1)
+        currentDate = getNextWorkingDay(currentDate, holidays)
+        currentTime = getShiftStartTime(currentDate)
+        isModStartDay = false
+      }
+    }
+
+    return {
+      columns,
+      rows,
+      statusLabel: 'MOD schedule refreshed from upload time',
+      statusTone: 'success',
+      taktTime: Number.isFinite(taktTime) ? taktTime.toFixed(2) : null,
+    }
+  }
 
   for (const row of rows) {
     const status = String(row.Status ?? '').trim().toUpperCase()
@@ -806,9 +1075,42 @@ function buildSimpleBarData(labels, values, colors) {
   }
 }
 
+function getStatusCellClass(column, value) {
+  const status = normalizeLookupKey(value)
+
+  if (column === 'Engine status') {
+    if (['CONSUMES', 'CONSUMED', 'DRESSING', 'FG', 'BOOKED NOT YET STORED', 'RAPID PRIME'].some((keyword) => status.includes(keyword))) {
+      return 'cell-status-green'
+    }
+    if (['PAINT AREA', 'TESTED BUFFER', 'FLY WHEEL BUFFER', 'FLY WHEEL AREA'].some((keyword) => status.includes(keyword))) {
+      return 'cell-status-yellow'
+    }
+    return 'cell-status-red'
+  }
+
+  if (column === 'Transmission status') {
+    if (['DRESSING', 'CONSUMED', 'RETRIEVAL TRIGGER RECEIVED', 'FG'].some((keyword) => status.includes(keyword))) {
+      return 'cell-status-green'
+    }
+    if (['TEST COMPLETED BUFFER', 'RE-OIL FILLED BUFFER'].some((keyword) => status.includes(keyword))) {
+      return 'cell-status-yellow'
+    }
+    return 'cell-status-red'
+  }
+
+  return ''
+}
+
 function getTableCellClass(column, value, shortageCount) {
+  const statusClass = getStatusCellClass(column, value)
+  if (statusClass) {
+    return statusClass
+  }
   if (SHORTAGE_MARKERS.has(String(value))) {
     return 'cell-shortage'
+  }
+  if (column === REASON_COLUMN && value === 'Released') {
+    return 'cell-released'
   }
   if (value === 'Covered') {
     return 'cell-covered'
@@ -1160,6 +1462,8 @@ function App() {
   const shortageIntro =
     'Upload variant Excel files, confirm the derived part number, and provide part name, reference order, and quantity for each shortage.'
   const [reportFiles, setReportFiles] = useState({ opening: null, mod: null })
+  const [reportUploadedAt, setReportUploadedAt] = useState({ opening: null, mod: null })
+  const [modStartSequence, setModStartSequence] = useState('')
   const [engineStatusFile, setEngineStatusFile] = useState(null)
   const [dragActiveReport, setDragActiveReport] = useState(null)
   const [capacity, setCapacity] = useState('')
@@ -1189,16 +1493,39 @@ function App() {
   }, {})
   const analysis = analyses[activeReport] ?? analyses.opening ?? analyses.mod
   const availableReports = Object.keys(REPORT_TYPES).filter((reportKey) => analyses[reportKey])
+  const modUploadedAt =
+    reportUploadedAt.mod ??
+    (reportFiles.mod?.lastModified ? new Date(reportFiles.mod.lastModified).toISOString() : null)
+  const modSkipKeys = buildVehicleKeySet(analyses.mod?.skipOrders ?? [])
 
-  const sequencedPreview = applySequence(
-    analysis?.previewColumns ?? [],
-    analysis?.previewData ?? [],
+  const openingSequencedPreview = applySequence(
+    analyses.opening?.previewColumns ?? [],
+    analyses.opening?.previewData ?? [],
     capacity,
     startDate,
     holidays,
     lineType,
   )
-  const previewWithReasons = applySkipHoldReasons(sequencedPreview, analysis, reasonConfig)
+  const sequencedPreview =
+    activeReport === 'mod' && analyses.mod
+      ? applySequence(
+          analyses.mod.previewColumns ?? [],
+          analyses.mod.previewData ?? [],
+          capacity,
+          startDate,
+          holidays,
+          lineType,
+          openingSequencedPreview.rows,
+          modUploadedAt,
+          modStartSequence,
+          modSkipKeys,
+        )
+      : openingSequencedPreview
+  const releasedHoldKeys =
+    activeReport === 'mod' && analyses.opening && analyses.mod
+      ? buildReleasedHoldKeys(openingSequencedPreview.rows, sequencedPreview.rows)
+      : new Set()
+  const previewWithReasons = applySkipHoldReasons(sequencedPreview, analysis, reasonConfig, releasedHoldKeys)
   const deferredPreviewRows = useDeferredValue(previewWithReasons.rows)
   const inferenceCards = buildInference(sequencedPreview.rows, analysis?.summary?.shortage_parts ?? [], shortagePartNames)
 
@@ -1220,6 +1547,8 @@ function App() {
 
         if (workspace) {
           setReportFiles(workspace.reportFiles ?? { opening: null, mod: null })
+          setReportUploadedAt(workspace.reportUploadedAt ?? { opening: null, mod: null })
+          setModStartSequence(workspace.modStartSequence ?? '')
           setEngineStatusFile(workspace.engineStatusFile ?? null)
           setCapacity(workspace.capacity ?? '')
           setStartDate(workspace.startDate ?? '')
@@ -1254,6 +1583,8 @@ function App() {
     workspaceSaveTimerRef.current = window.setTimeout(() => {
       writeWorkspace(lineType, {
         reportFiles,
+        reportUploadedAt,
+        modStartSequence,
         engineStatusFile,
         capacity,
         startDate,
@@ -1272,7 +1603,7 @@ function App() {
     return () => {
       window.clearTimeout(workspaceSaveTimerRef.current)
     }
-  }, [lineType, reportFiles, engineStatusFile, capacity, startDate, holidayInput, holidays, shortages, analyses, activeReport, reasonConfig])
+  }, [lineType, reportFiles, reportUploadedAt, modStartSequence, engineStatusFile, capacity, startDate, holidayInput, holidays, shortages, analyses, activeReport, reasonConfig])
 
   function pushToast(message, type = 'danger') {
     toastCounterRef.current += 1
@@ -1321,6 +1652,10 @@ function App() {
       ...current,
       [reportKey]: file,
     }))
+    setReportUploadedAt((current) => ({
+      ...current,
+      [reportKey]: file ? new Date().toISOString() : null,
+    }))
     setAnalyses((current) => ({
       ...current,
       [reportKey]: null,
@@ -1328,6 +1663,12 @@ function App() {
     if (activeReport === reportKey) {
       setActiveReport('opening')
     }
+  }
+
+  function updateEngineStatusFile(file) {
+    setEngineStatusFile(file)
+    setAnalyses({ opening: null, mod: null })
+    setActiveReport('opening')
   }
 
   function removeShortage(id) {
@@ -1356,6 +1697,8 @@ function App() {
       pushToast('Saved workspace could not be cleared in this browser.', 'warning')
     })
     setReportFiles({ opening: null, mod: null })
+    setReportUploadedAt({ opening: null, mod: null })
+    setModStartSequence('')
     setEngineStatusFile(null)
     setDragActiveReport(null)
     setCapacity('')
@@ -1447,11 +1790,15 @@ function App() {
     }))
   }
 
-  function buildAnalysisFormData(file) {
+  function buildAnalysisFormData(file, options = {}) {
     const formData = new FormData()
     formData.append('file', file)
     if (engineStatusFile) {
       formData.append('engine_status_file', engineStatusFile)
+    }
+
+    for (const key of options.openingHoldKeys ?? []) {
+      formData.append('opening_hold_keys', key)
     }
 
     for (const shortage of shortages) {
@@ -1459,6 +1806,7 @@ function App() {
         formData.append('shortage_parts', shortage.part.trim())
         formData.append('shortage_refs', shortage.ref.trim())
         formData.append('shortage_qtys', shortage.qty.toString().trim())
+        formData.append('shortage_usages', (shortage.usage || '1').toString().trim())
         formData.append('shortage_files', shortage.file)
       }
     }
@@ -1466,8 +1814,8 @@ function App() {
     return formData
   }
 
-  async function analyzeReport(file) {
-    const response = await fetch('/api/analyze', { method: 'POST', body: buildAnalysisFormData(file) })
+  async function analyzeReport(file, options = {}) {
+    const response = await fetch('/api/analyze', { method: 'POST', body: buildAnalysisFormData(file, options) })
     const raw = await response.json()
     if (!response.ok || raw.error) {
       throw new Error(raw.error || 'Server returned an unexpected error.')
@@ -1481,13 +1829,15 @@ function App() {
       return
     }
 
-    const reportsToAnalyze = Object.keys(REPORT_TYPES).filter((reportKey) => reportFiles[reportKey])
-
     setLoading(true)
     try {
       const nextAnalyses = {}
-      for (const reportKey of reportsToAnalyze) {
-        nextAnalyses[reportKey] = await analyzeReport(reportFiles[reportKey])
+      nextAnalyses.opening = await analyzeReport(reportFiles.opening)
+
+      if (reportFiles.mod) {
+        nextAnalyses.mod = await analyzeReport(reportFiles.mod, {
+          openingHoldKeys: buildOpeningHoldKeys(nextAnalyses.opening.previewData ?? []),
+        })
       }
 
       startTransition(() => {
@@ -1721,7 +2071,7 @@ function App() {
                           onChange={(event) => updateShortage(shortage.id, { ref: event.target.value })}
                         />
                       </div>
-                      <div className="col-sm-4">
+                      <div className="col-sm-3">
                         <label className="form-label small fw-semibold">Qty</label>
                         <input
                           type="number"
@@ -1731,7 +2081,18 @@ function App() {
                           onChange={(event) => updateShortage(shortage.id, { qty: event.target.value })}
                         />
                       </div>
-                      <div className="col-sm-8">
+                      <div className="col-sm-3">
+                        <label className="form-label small fw-semibold">Usage / vehicle</label>
+                        <input
+                          type="number"
+                          min="1"
+                          step="1"
+                          className="form-control form-control-sm"
+                          value={shortage.usage ?? '1'}
+                          onChange={(event) => updateShortage(shortage.id, { usage: event.target.value })}
+                        />
+                      </div>
+                      <div className="col-sm-6">
                         <label className="form-label small fw-semibold">Variant File</label>
                         <input
                           type="file"
@@ -1806,6 +2167,23 @@ function App() {
                   })}
                 </div>
 
+                <div className="mt-3">
+                  <label className="form-label fw-semibold small">MOD first non-skip TRIM LINE sequence</label>
+                  <div className="input-group input-group-sm">
+                    <span className="input-group-text">
+                      <i className="bi bi-list-ol" />
+                    </span>
+                    <input
+                      type="number"
+                      className="form-control"
+                      min="1"
+                      placeholder="Enter line in sequence"
+                      value={modStartSequence}
+                      onChange={(event) => setModStartSequence(event.target.value)}
+                    />
+                  </div>
+                </div>
+
                 <label
                   htmlFor={`${fileInputId}-engine-status`}
                   className={`report-upload-card engine-status-upload ${dragActiveReport === 'engine-status' ? 'drag-active' : ''}`}
@@ -1819,7 +2197,7 @@ function App() {
                     setDragActiveReport(null)
                     const file = event.dataTransfer.files?.[0]
                     if (file) {
-                      setEngineStatusFile(file)
+                      updateEngineStatusFile(file)
                     }
                   }}
                 >
@@ -1833,7 +2211,7 @@ function App() {
                   type="file"
                   accept=".xlsx,.xls,.csv"
                   className="d-none"
-                  onChange={(event) => setEngineStatusFile(event.target.files?.[0] ?? null)}
+                  onChange={(event) => updateEngineStatusFile(event.target.files?.[0] ?? null)}
                 />
 
                 <div className="action-row">

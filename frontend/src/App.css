@@ -668,6 +668,37 @@
   font-weight: 700;
 }
 
+.cell-released {
+  background: #c8f3d8 !important;
+  color: #146c43 !important;
+  text-align: center;
+  font-weight: 800;
+}
+
+.cell-status-green,
+.preview-table tr td.cell-status-green {
+  background: #d7f8df !important;
+  color: #146c43 !important;
+  text-align: center;
+  font-weight: 800;
+}
+
+.cell-status-yellow,
+.preview-table tr td.cell-status-yellow {
+  background: #fff4bf !important;
+  color: #7a5900 !important;
+  text-align: center;
+  font-weight: 800;
+}
+
+.cell-status-red,
+.preview-table tr td.cell-status-red {
+  background: #ffd6d9 !important;
+  color: #842029 !important;
+  text-align: center;
+  font-weight: 800;
+}
+
 .state-pill {
   display: inline-flex;
   align-items: center;
