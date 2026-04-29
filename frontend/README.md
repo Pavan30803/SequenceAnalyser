@@ -22,7 +22,11 @@ The Vite dev server proxies `/api` to the Flask backend at `http://127.0.0.1:505
 - Dedicated HDT and MDT analyzer tabs.
 - Opening and MOD report analytics views.
 - Shortage mapping from multi-file part uploads.
+- Usage quantity per vehicle for shortage coverage.
 - Engine and transmission status report upload.
+- Engine/transmission status color highlighting.
+- MOD start sequence entry for the first non-skip TRIM LINE vehicle.
+- Released-HOLD handling in MOD analysis.
 - Skip/hold reason and outlook entry.
 - Browser workspace persistence via IndexedDB.
 - CSV exports for preview, hold orders, and skip orders.

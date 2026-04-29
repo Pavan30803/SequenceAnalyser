@@ -3,6 +3,8 @@ from pathlib import Path
 from flask import Flask, request, jsonify, send_file
 import pandas as pd
 import io
+from openpyxl import load_workbook
+from openpyxl.styles.colors import COLOR_INDEX
 
 app = Flask(__name__)
 BASE_DIR = Path(__file__).resolve().parent
@@ -37,8 +39,57 @@ def normalize_order_key(value):
     return digits[-6:] if len(digits) >= 6 else digits
 
 
-def analyze_sequence(df, shortages, engine_transmission_statuses=None, opening_hold_keys=None):
+def normalize_fill_hex(cell):
+    for color in (cell.fill.fgColor, cell.fill.start_color, cell.fill.bgColor):
+        if color.type == 'rgb' and color.rgb:
+            return str(color.rgb)[-6:].upper()
+        if color.type == 'indexed' and color.indexed is not None:
+            indexed_color = COLOR_INDEX[color.indexed]
+            if indexed_color:
+                return str(indexed_color)[-6:].upper()
+    return ''
+
+
+def combine_axle_status(colors):
+    color_set = {color for color in colors if color}
+    if not color_set:
+        return ''
+    if 'FF9900' in color_set:
+        return 'WIP'
+    if 'C0C0C0' in color_set:
+        return 'NOT STARTED'
+    if color_set == {'00FF00'}:
+        return 'AVAILABLE'
+    if color_set.issubset({'00FF00', 'FFFF00'}):
+        return 'IN TRANSIT'
+    return ''
+
+
+def parse_axle_status_report(file_bytes):
+    workbook = load_workbook(io.BytesIO(file_bytes), data_only=True)
+    sheet = workbook.active
+    order_colors = {}
+
+    for row in sheet.iter_rows(min_row=2):
+        if len(row) < 5:
+            continue
+        order_key = normalize_order_key(row[1].value)
+        if not order_key:
+            continue
+        color_hex = normalize_fill_hex(row[4])
+        if color_hex:
+            order_colors.setdefault(order_key, []).append(color_hex)
+
+    return {
+        order_key: combine_axle_status(colors)
+        for order_key, colors in order_colors.items()
+        if combine_axle_status(colors)
+    }
+
+
+def analyze_sequence(df, shortages, engine_transmission_statuses=None, axle_statuses=None, opening_hold_keys=None, line_type='HDT'):
     opening_hold_keys = {normalize_order_key(key) for key in (opening_hold_keys or []) if normalize_order_key(key)}
+    line_type = str(line_type or 'HDT').strip().upper()
 
     if df.empty:
         return {
@@ -95,6 +146,28 @@ def analyze_sequence(df, shortages, engine_transmission_statuses=None, opening_h
             return serial_key
         return normalize_order_key(row.get(dsn_col, '')) if dsn_col else ''
 
+    def get_vehicle_lookup_keys(row):
+        keys = []
+        candidate_cols = [order_col, serial_col, dsn_col]
+        for fallback_idx in (1, 2, 3):
+            if len(original_df.columns) > fallback_idx:
+                candidate_cols.append(original_df.columns[fallback_idx])
+
+        for column in candidate_cols:
+            if not column:
+                continue
+            key = normalize_order_key(row.get(column, ''))
+            if key and key not in keys:
+                keys.append(key)
+
+        return keys
+
+    def get_first_mapped_value(mapping, row, default=''):
+        for key in get_vehicle_lookup_keys(row):
+            if key in mapping:
+                return mapping[key]
+        return default
+
     def is_released_hold_row(row):
         if not opening_hold_keys:
             return False
@@ -112,6 +185,13 @@ def analyze_sequence(df, shortages, engine_transmission_statuses=None, opening_h
         desc_str = str(desc_val).strip()
         if not desc_str or desc_str.lower() == 'nan':
             return 'Unknown'
+        if line_type == 'MDT':
+            desc_upper = desc_str.upper()
+            if len(desc_upper) >= 6 and desc_upper[4:6] in ['RE', 'RD']:
+                return desc_str[:6]
+            if len(desc_upper) >= 5 and desc_upper[4] in ['R', 'C']:
+                return desc_str[:5]
+            return desc_str[:4] if len(desc_str) >= 4 else desc_str
         if len(desc_str) >= 6 and desc_str[5] in ['T', 'S', 'M']:
             return desc_str[:6]
         elif len(desc_str) >= 5:
@@ -177,15 +257,10 @@ def analyze_sequence(df, shortages, engine_transmission_statuses=None, opening_h
         status_insert_idx = list(original_df.columns).index(hold_status_col) + 1
 
     if has_engine_transmission_report:
-        order_lookup_col = order_col
-        if not order_lookup_col and len(original_df.columns) > 2:
-            order_lookup_col = original_df.columns[2]
-
         engine_values = []
         transmission_values = []
         for _, row in original_df.iterrows():
-            order_key = normalize_order_key(row.get(order_lookup_col, '')) if order_lookup_col else ''
-            mapped_status = engine_transmission_statuses.get(order_key, {})
+            mapped_status = get_first_mapped_value(engine_transmission_statuses, row, {})
             engine_status = mapped_status.get('engine_status', '')
             if not engine_status:
                 engine_status = get_engine_status_fallback(row.get(variant_col, '')) if variant_col else ''
@@ -195,6 +270,22 @@ def analyze_sequence(df, shortages, engine_transmission_statuses=None, opening_h
         original_df.insert(status_insert_idx, 'Engine status', engine_values)
         original_df.insert(status_insert_idx + 1, 'Transmission status', transmission_values)
         extra_cols.extend(['Engine status', 'Transmission status'])
+
+    # =========================================================
+    # AXLE STATUS MAPPING
+    # =========================================================
+    if axle_statuses:
+        axle_values = []
+        for _, row in original_df.iterrows():
+            axle_values.append(get_first_mapped_value(axle_statuses, row))
+
+        axle_insert_idx = len(original_df.columns)
+        country_col = next((c for c in original_df.columns if str(c).strip().upper() == 'COUNTRY'), None)
+        if country_col:
+            axle_insert_idx = list(original_df.columns).index(country_col)
+
+        original_df.insert(axle_insert_idx, 'Axle status', axle_values)
+        extra_cols.append('Axle status')
 
     # =========================================================
     # PART SHORTAGE MAPPING LOGIC (WITH REF & QTY)
@@ -285,6 +376,7 @@ def analyze_sequence(df, shortages, engine_transmission_statuses=None, opening_h
     is_in_anomaly_block = False
     current_anomaly_group = []
     anomaly_start_seq = None
+    released_hold_anchor_seq = None
 
     for _, row in df.iterrows():
         current_seq = int(row['_seq_int'])
@@ -297,8 +389,14 @@ def analyze_sequence(df, shortages, engine_transmission_statuses=None, opening_h
         expected_next = last_valid_seq + 1
         released_hold_row = is_released_hold_row(row)
 
+        if released_hold_anchor_seq is not None and current_seq == released_hold_anchor_seq + 1:
+            last_valid_seq = current_seq
+            released_hold_anchor_seq = None
+            continue
+
         if current_seq == expected_next:
             last_valid_seq = current_seq
+            released_hold_anchor_seq = None
             
             if is_in_anomaly_block:
                 first_anomaly = current_anomaly_group[0]['_seq_int']
@@ -316,6 +414,7 @@ def analyze_sequence(df, shortages, engine_transmission_statuses=None, opening_h
                 is_in_anomaly_block = False
         else:
             if released_hold_row:
+                released_hold_anchor_seq = current_seq
                 continue
 
             if is_in_anomaly_block:
@@ -455,7 +554,9 @@ def analyze():
     shortage_usages = request.form.getlist('shortage_usages')
     shortage_files = request.files.getlist('shortage_files')
     engine_status_file = request.files.get('engine_status_file')
+    axle_status_file = request.files.get('axle_status_file')
     opening_hold_keys = request.form.getlist('opening_hold_keys')
+    line_type = request.form.get('line_type', 'HDT')
     
     shortages = {}
     for i in range(min(len(shortage_parts), len(shortage_files))):
@@ -508,9 +609,16 @@ def analyze():
         except Exception as e:
             print(f"Error parsing engine/transmission status file: {e}")
 
+    axle_statuses = None
+    if axle_status_file and axle_status_file.filename:
+        try:
+            axle_statuses = parse_axle_status_report(axle_status_file.read())
+        except Exception as e:
+            print(f"Error parsing axle status file: {e}")
+
     try:
         df = parse_excel(f.read())
-        result = analyze_sequence(df, shortages, engine_transmission_statuses, opening_hold_keys)
+        result = analyze_sequence(df, shortages, engine_transmission_statuses, axle_statuses, opening_hold_keys, line_type)
         return jsonify(result)
     except Exception as e:
         print(f"Server Error during analysis: {str(e)}")

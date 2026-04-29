@@ -83,7 +83,8 @@ const PIE_HOLD_COLORS = ['#d9485f', '#f08949', '#ef7d95', '#5f50cf', '#15938f', 
 const PIE_SKIP_COLORS = ['#ffc145', '#3cb371', '#3c91e6', '#2ec4b6', '#7c4dff', '#ef476f', '#ff8c42', '#9aa8bc']
 const REASON_COLUMN = 'Skip/hold reason'
 const OUTLOOK_COLUMN = 'Outlook'
-const SEQUENCE_COLUMNS = ['Line in sequence', 'Production Date', 'Line in time']
+const RELEASE_SEQUENCE_COLUMN = 'Release sequence'
+const SEQUENCE_COLUMNS = ['Line in sequence', 'Production Date', 'Line in time', RELEASE_SEQUENCE_COLUMN]
 const LANDING_IMAGE_URL = 'https://www.bharatbenz.com/uploads/homebanner_images/large/BB-Construction.jpg'
 const LINE_TYPES = {
   HDT: {
@@ -97,7 +98,7 @@ const LINE_TYPES = {
     title: 'MDT',
     description: 'Medium-duty truck single-shift timing',
     standardMinutes: 541,
-    thursdayMinutes: 541,
+    thursdayMinutes: 481,
     shiftEndMinute: 16 * 60 + 45,
   },
 }
@@ -113,6 +114,31 @@ const REPORT_TYPES = {
     copy: 'Updated mid-shift report for refreshed analytics.',
   },
 }
+const PLAN_REPORT_TYPE = {
+  title: 'Plan & Summary',
+  shortTitle: 'Plan',
+  copy: 'Current-day plan message generated from the Opening report.',
+}
+const ANALYTICS_VIEW_TYPES = {
+  ...REPORT_TYPES,
+  plan: PLAN_REPORT_TYPE,
+}
+const VAJRA_VARIANTS = new Set([
+  'V400842221O000103',
+  'V400842221O0Y0103',
+  'V400842231O0FK103',
+  'V400842231O0WK103',
+  'V400854221N000103',
+  'V400854221N000203',
+  'V400854231N0F5103',
+  'V400854231N0F5203',
+  'V400854231N0FA103',
+])
+const PLAN_VARIANT_TARGETS = [
+  { label: '40KL', variant: 'V400905220U570C02' },
+  { label: '28 ft Balancer', variant: 'V400905220U5T0102' },
+  { label: '4828RT', variant: 'V400985220O0A0802' },
+]
 
 function getInitialLineType() {
   const lineParam = new URLSearchParams(window.location.search).get('line')?.toUpperCase()
@@ -394,6 +420,21 @@ function buildSequenceBaseline(rows = []) {
   return baseline
 }
 
+function buildReleaseSequenceBaseline(rows = []) {
+  const baseline = new Map()
+
+  for (const row of rows) {
+    const key = getPreviewVehicleKey(row)
+    const releaseSequence = row?.[RELEASE_SEQUENCE_COLUMN]
+
+    if (key && releaseSequence !== '' && releaseSequence !== undefined && releaseSequence !== null && !baseline.has(key)) {
+      baseline.set(key, releaseSequence)
+    }
+  }
+
+  return baseline
+}
+
 function getGroupValue(row, groupBy) {
   return normalizeLookupValue(row?.[groupBy]) || 'Unknown'
 }
@@ -595,6 +636,7 @@ const DAY_SHIFT_BREAKS = [
   { start: 11 * 60 + 30, end: 12 * 60 },
   { start: 14 * 60 + 30, end: 14 * 60 + 37 },
 ]
+const THURSDAY_PLANNED_STOP = { start: 8 * 60 + 30, end: 9 * 60 + 30 }
 const HDT_EXTENDED_SHIFT_BREAKS = [
   ...DAY_SHIFT_BREAKS,
   { start: 18 * 60 + 30, end: 18 * 60 + 37 },
@@ -674,7 +716,11 @@ function getModStartTime(uploadedAt, holidays, lineType) {
 }
 
 function getBreakWindows(productionDate, lineType) {
-  const breaks = lineType === 'MDT' ? DAY_SHIFT_BREAKS : HDT_EXTENDED_SHIFT_BREAKS
+  const baseBreaks = lineType === 'MDT' ? DAY_SHIFT_BREAKS : HDT_EXTENDED_SHIFT_BREAKS
+  const breaks = productionDate.getDay() === 4
+    ? [...baseBreaks, THURSDAY_PLANNED_STOP].sort((a, b) => a.start - b.start)
+    : baseBreaks
+
   return breaks.map((breakWindow) => ({
     start: createShiftTime(productionDate, breakWindow.start),
     end: createShiftTime(productionDate, breakWindow.end),
@@ -724,6 +770,50 @@ function addProductionMinutes(date, minutes, productionDate, lineType) {
   }
 
   return skipProductionBreaks(currentTime, productionDate, lineType)
+}
+
+function applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType = 'HDT', baselineRows = []) {
+  const lineConfig = LINE_TYPES[lineType] ?? LINE_TYPES.HDT
+  const [year, month, day] = startDate.split('-').map((value) => Number.parseInt(value, 10))
+  let currentDate = getNextWorkingDay(new Date(year, month - 1, day), holidays)
+  let releaseStarted = false
+  let releaseCounter = 1
+  let todayCapacity = baseCapacity
+  const releaseBaseline = buildReleaseSequenceBaseline(baselineRows)
+  const hasReleaseBaseline = releaseBaseline.size > 0
+
+  for (const row of rows) {
+    const status = normalizeLookupKey(getPreviewValue(row, ['Status', 'STATUS', 'status']))
+    const state = getPreviewOrderState(row)
+    if (!releaseStarted && status === 'PBS' && state === 'CREATED') {
+      releaseStarted = true
+      const baselineSequence = Number.parseInt(releaseBaseline.get(getPreviewVehicleKey(row)), 10)
+      if (hasReleaseBaseline && Number.isFinite(baselineSequence) && baselineSequence > 0) {
+        releaseCounter = baselineSequence
+      }
+    }
+
+    if (!releaseStarted) {
+      row[RELEASE_SEQUENCE_COLUMN] = ''
+      continue
+    }
+
+    if (releaseCounter === 1) {
+      todayCapacity =
+        currentDate.getDay() === 4
+          ? Math.floor(baseCapacity * (lineConfig.thursdayMinutes / lineConfig.standardMinutes))
+          : baseCapacity
+    }
+
+    row[RELEASE_SEQUENCE_COLUMN] = releaseCounter
+    releaseCounter += 1
+
+    if (releaseCounter > todayCapacity) {
+      releaseCounter = 1
+      currentDate.setDate(currentDate.getDate() + 1)
+      currentDate = getNextWorkingDay(currentDate, holidays)
+    }
+  }
 }
 
 function applySequence(
@@ -805,9 +895,11 @@ function applySequence(
       row['Line in sequence'] = ''
       row['Production Date'] = ''
       row['Line in time'] = ''
+      row[RELEASE_SEQUENCE_COLUMN] = ''
     })
 
     if (firstTrimIndex === -1 || !modStart || !Number.isFinite(anchoredSequence) || anchoredSequence <= 0) {
+      applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType, baselineRows)
       return {
         columns,
         rows,
@@ -849,13 +941,21 @@ function applySequence(
         taktTime = currentDayMinutes / todayCapacity
       }
 
-      const shiftEnd = getShiftEndTime(currentDate, lineType)
-      currentTime = skipProductionBreaks(currentTime, currentDate, lineType)
-      if (currentTime >= shiftEnd) {
+      let shiftEnd = getShiftEndTime(currentDate, lineType)
+      currentTime = addProductionMinutes(currentTime, taktTime, currentDate, lineType)
+      if (currentTime > shiftEnd) {
         counter = 1
         currentDate.setDate(currentDate.getDate() + 1)
         currentDate = getNextWorkingDay(currentDate, holidays)
         currentTime = getShiftStartTime(currentDate)
+        currentDayMinutes = currentDate.getDay() === 4 ? thursdayTotalMinutes : standardTotalMinutes
+        todayCapacity =
+          currentDate.getDay() === 4
+            ? Math.floor(baseCapacity * (thursdayTotalMinutes / standardTotalMinutes))
+            : baseCapacity
+        taktTime = currentDayMinutes / todayCapacity
+        currentTime = addProductionMinutes(currentTime, taktTime, currentDate, lineType)
+        shiftEnd = getShiftEndTime(currentDate, lineType)
         isModStartDay = false
       }
 
@@ -863,10 +963,9 @@ function applySequence(
       row['Production Date'] = formatDateKey(currentDate)
       row['Line in time'] = formatLineTime(currentTime)
 
-      currentTime = addProductionMinutes(currentTime, taktTime, currentDate, lineType)
       counter += 1
 
-      if (currentTime >= getShiftEndTime(currentDate, lineType)) {
+      if (currentTime >= shiftEnd) {
         counter = 1
         currentDate.setDate(currentDate.getDate() + 1)
         currentDate = getNextWorkingDay(currentDate, holidays)
@@ -874,6 +973,8 @@ function applySequence(
         isModStartDay = false
       }
     }
+
+    applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType, baselineRows)
 
     return {
       columns,
@@ -894,6 +995,7 @@ function applySequence(
       row['Line in sequence'] = ''
       row['Production Date'] = ''
       row['Line in time'] = ''
+      row[RELEASE_SEQUENCE_COLUMN] = ''
       continue
     }
 
@@ -909,12 +1011,23 @@ function applySequence(
       currentTime.setHours(7, 0, 0, 0)
     }
 
-    currentTime = skipProductionBreaks(currentTime, currentDate, lineType)
+    currentTime = addProductionMinutes(currentTime, taktTime, currentDate, lineType)
+    if (currentTime > getShiftEndTime(currentDate, lineType)) {
+      counter = 1
+      currentDate.setDate(currentDate.getDate() + 1)
+      currentDate = getNextWorkingDay(currentDate, holidays)
+      currentDayMinutes = currentDate.getDay() === 4 ? thursdayTotalMinutes : standardTotalMinutes
+      todayCapacity =
+        currentDate.getDay() === 4
+          ? Math.floor(baseCapacity * (thursdayTotalMinutes / standardTotalMinutes))
+          : baseCapacity
+      taktTime = currentDayMinutes / todayCapacity
+      currentTime = addProductionMinutes(getShiftStartTime(currentDate), taktTime, currentDate, lineType)
+    }
+
     row['Line in sequence'] = counter
     row['Production Date'] = formatDateKey(currentDate)
     row['Line in time'] = formatLineTime(currentTime)
-
-    currentTime = addProductionMinutes(currentTime, taktTime, currentDate, lineType)
 
     counter += 1
     if (counter > todayCapacity) {
@@ -923,6 +1036,8 @@ function applySequence(
       currentDate = getNextWorkingDay(currentDate, holidays)
     }
   }
+
+  applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType)
 
   return {
     columns,
@@ -1079,7 +1194,7 @@ function getStatusCellClass(column, value) {
   const status = normalizeLookupKey(value)
 
   if (column === 'Engine status') {
-    if (['CONSUMES', 'CONSUMED', 'DRESSING', 'FG', 'BOOKED NOT YET STORED', 'RAPID PRIME'].some((keyword) => status.includes(keyword))) {
+    if (['CONSUMES', 'CONSUMED', 'DRESSING', 'FG', 'BOOKED NOT YET STORED', 'RAPID PRIME', 'RETRIEVAL TRIGGER RECEIVED'].some((keyword) => status.includes(keyword))) {
       return 'cell-status-green'
     }
     if (['PAINT AREA', 'TESTED BUFFER', 'FLY WHEEL BUFFER', 'FLY WHEEL AREA'].some((keyword) => status.includes(keyword))) {
@@ -1089,7 +1204,7 @@ function getStatusCellClass(column, value) {
   }
 
   if (column === 'Transmission status') {
-    if (['DRESSING', 'CONSUMED', 'RETRIEVAL TRIGGER RECEIVED', 'FG'].some((keyword) => status.includes(keyword))) {
+    if (['DRESSING', 'CONSUMED', 'RETRIEVAL TRIGGER RECEIVED', 'RETRIEVED', 'RETREIVED', 'FG'].some((keyword) => status.includes(keyword))) {
       return 'cell-status-green'
     }
     if (['TEST COMPLETED BUFFER', 'RE-OIL FILLED BUFFER'].some((keyword) => status.includes(keyword))) {
@@ -1098,7 +1213,123 @@ function getStatusCellClass(column, value) {
     return 'cell-status-red'
   }
 
+  if (column === 'Axle status') {
+    if (status === 'AVAILABLE') {
+      return 'cell-status-green'
+    }
+    if (status === 'IN TRANSIT') {
+      return 'cell-status-yellow'
+    }
+    if (status === 'WIP') {
+      return 'cell-status-orange'
+    }
+    if (status === 'NOT STARTED') {
+      return 'cell-status-red'
+    }
+  }
+
   return ''
+}
+
+const ENGINE_FG_SUMMARY_STATUSES = new Set([
+  'FG',
+  'BOOKED NOT YET STORED',
+  'RETRIEVAL TRIGGER RECEIVED',
+])
+const HDT_A_SHIFT_END_MINUTE = 16 * 60 + 45
+
+function normalizeSummaryStatus(column, value) {
+  const status = normalizeLookupValue(value)
+
+  if (column === 'Engine status' && ENGINE_FG_SUMMARY_STATUSES.has(normalizeLookupKey(status))) {
+    return 'FG'
+  }
+
+  return status
+}
+
+function getLineTimeMinute(value) {
+  const match = normalizeLookupValue(value).match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i)
+  if (!match) {
+    return null
+  }
+
+  let hours = Number.parseInt(match[1], 10)
+  const minutes = Number.parseInt(match[2], 10)
+  const meridiem = match[3].toUpperCase()
+
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) {
+    return null
+  }
+
+  if (hours === 12) {
+    hours = 0
+  }
+  if (meridiem === 'PM') {
+    hours += 12
+  }
+
+  const minuteOfDay = hours * 60 + minutes
+  return minuteOfDay < 7 * 60 ? minuteOfDay + 24 * 60 : minuteOfDay
+}
+
+function buildStatusCounts(rows, column) {
+  const counts = new Map()
+
+  for (const row of rows) {
+    const value = normalizeSummaryStatus(column, row?.[column])
+    if (!value) {
+      continue
+    }
+    counts.set(value, (counts.get(value) ?? 0) + 1)
+  }
+
+  return [...counts.entries()]
+    .map(([status, count]) => ({ status, count }))
+    .sort((a, b) => b.count - a.count || a.status.localeCompare(b.status))
+}
+
+function buildShiftStatusSummary(label, rows) {
+  return {
+    label,
+    rowCount: rows.length,
+    engine: buildStatusCounts(rows, 'Engine status'),
+    transmission: buildStatusCounts(rows, 'Transmission status'),
+    axle: buildStatusCounts(rows, 'Axle status'),
+  }
+}
+
+function buildCurrentDayStatusSummary(rows = [], lineType = 'HDT') {
+  const currentDay = rows.find((row) => normalizeLookupValue(row?.['Production Date']))?.['Production Date'] ?? ''
+  const dayRows = currentDay
+    ? rows.filter((row) => normalizeLookupValue(row?.['Production Date']) === String(currentDay))
+    : []
+  const aShiftRows = lineType === 'HDT'
+    ? dayRows.filter((row) => {
+        const lineMinute = getLineTimeMinute(row?.['Line in time'])
+        return lineMinute !== null && lineMinute < HDT_A_SHIFT_END_MINUTE
+      })
+    : []
+  const bShiftRows = lineType === 'HDT'
+    ? dayRows.filter((row) => {
+        const lineMinute = getLineTimeMinute(row?.['Line in time'])
+        return lineMinute !== null && lineMinute >= HDT_A_SHIFT_END_MINUTE
+      })
+    : []
+
+  return {
+    currentDay,
+    rowCount: dayRows.length,
+    engine: buildStatusCounts(dayRows, 'Engine status'),
+    transmission: buildStatusCounts(dayRows, 'Transmission status'),
+    axle: buildStatusCounts(dayRows, 'Axle status'),
+    shifts: lineType === 'HDT'
+      ? [
+          buildShiftStatusSummary('A shift', aShiftRows),
+          buildShiftStatusSummary('B shift', bShiftRows),
+        ]
+      : [],
+  }
 }
 
 function getTableCellClass(column, value, shortageCount) {
@@ -1116,7 +1347,7 @@ function getTableCellClass(column, value, shortageCount) {
     return 'cell-covered'
   }
   if (
-    ['Line in sequence', 'Production Date', 'Line in time'].includes(column) &&
+    SEQUENCE_COLUMNS.includes(column) &&
     value !== '' &&
     value !== null &&
     value !== undefined
@@ -1132,6 +1363,40 @@ function getPreviewRowClass(shortageCount) {
   if (shortageCount === 3) return 'row-shortage-3'
   if (shortageCount >= 4) return 'row-shortage-4'
   return ''
+}
+
+function StatusSummaryTable({ title, column, rows }) {
+  return (
+    <div className="status-summary-block">
+      <h6>{title}</h6>
+      <div className="table-responsive">
+        <table className="table table-bordered mb-0 data-table status-summary-table">
+          <thead>
+            <tr>
+              <th>Status</th>
+              <th>Count</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.length > 0 ? (
+              rows.map((row) => (
+                <tr key={`${column}-${row.status}`}>
+                  <td className={getStatusCellClass(column, row.status)}>{row.status}</td>
+                  <td className="fw-bold text-center">{row.count}</td>
+                </tr>
+              ))
+            ) : (
+              <tr>
+                <td colSpan="2" className="text-center text-secondary py-3">
+                  No status data for this day.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  )
 }
 
 function StatCard({ label, value, tone, icon }) {
@@ -1172,7 +1437,7 @@ function PieChartCard({ title, icon, data, emptyMessage }) {
                 plugins: {
                   legend: {
                     position: 'right',
-                    labels: { boxWidth: 14, font: { size: 12, weight: 'bold' } },
+                    labels: { boxWidth: 16, font: { size: 16, weight: 'bold' } },
                   },
                   datalabels: { display: false },
                 },
@@ -1456,6 +1721,193 @@ function OrderCell({ field, value, holdTable }) {
   return <span>{safeValue}</span>
 }
 
+function getPlanRowValue(row, aliases) {
+  return getPreviewValue(row, aliases)
+}
+
+function isBusOrder(row) {
+  const variant = normalizeLookupKey(getPlanRowValue(row, ['Variant', 'VARIANT', 'variant']))
+  return ['V83', 'F83', 'M83', 'L83'].some((prefix) => variant.startsWith(prefix))
+}
+
+function isRapidPrimeOrder(row) {
+  const engineStatus = normalizeLookupKey(row?.['Engine status'])
+  const variant = normalizeLookupKey(getPlanRowValue(row, ['Variant', 'VARIANT', 'variant']))
+  return engineStatus.includes('RAPID PRIME') || (variant.length >= 11 && ['U', 'T'].includes(variant[10]))
+}
+
+function incrementCount(map, key) {
+  const safeKey = normalizeLookupValue(key) || 'Unknown'
+  map[safeKey] = (map[safeKey] ?? 0) + 1
+}
+
+function buildModelCounts(rows) {
+  return rows.reduce((counts, row) => {
+    incrementCount(counts, row.Model ?? getPlanRowValue(row, ['Model', 'MODEL', 'model']))
+    return counts
+  }, {})
+}
+
+function buildPlanSummary(rows = [], openingColumns = []) {
+  const currentDay = rows.find((row) => normalizeLookupValue(row?.['Production Date']))?.['Production Date'] ?? ''
+  const currentDayRows = currentDay
+    ? rows.filter((row) => normalizeLookupValue(row?.['Production Date']) === String(currentDay) && normalizeLookupValue(row?.['Line in sequence']))
+    : []
+  const podestStateColumn =
+    openingColumns.find((column) => normalizeLookupKey(column) === 'PODEST STATE') ??
+    openingColumns[39] ??
+    ''
+  const busRows = currentDayRows.filter(isBusOrder)
+  const rapidPrimeRows = currentDayRows.filter(isRapidPrimeOrder)
+  const vajraRows = currentDayRows.filter((row) => VAJRA_VARIANTS.has(normalizeLookupKey(getPlanRowValue(row, ['Variant', 'VARIANT', 'variant']))))
+  const variantCounts = PLAN_VARIANT_TARGETS.map((target) => ({
+    ...target,
+    count: currentDayRows.filter((row) => normalizeLookupKey(getPlanRowValue(row, ['Variant', 'VARIANT', 'variant'])) === target.variant).length,
+  }))
+  const broCount = currentDayRows.filter((row) => normalizeLookupKey(getPlanRowValue(row, ['Description', 'DESCRIPTION', 'description'])).endsWith('RB')).length
+  const podestOpeningFg = podestStateColumn
+    ? busRows.filter((row) => normalizeLookupKey(row?.[podestStateColumn]) === 'BOOKED').length
+    : 0
+
+  return {
+    currentDay,
+    currentDayRows,
+    bus: {
+      total: busRows.length,
+      modelCounts: buildModelCounts(busRows),
+      podestOpeningFg,
+    },
+    rapidPrime: {
+      total: rapidPrimeRows.length,
+      modelCounts: buildModelCounts(rapidPrimeRows),
+    },
+    vajra: {
+      total: vajraRows.length,
+      modelCounts: buildModelCounts(vajraRows),
+    },
+    variantCounts,
+    broCount,
+  }
+}
+
+function CountList({ counts }) {
+  const rows = Object.entries(counts ?? {}).sort(([a], [b]) => a.localeCompare(b))
+  if (!rows.length) {
+    return <span className="text-secondary">No orders</span>
+  }
+
+  return (
+    <div className="plan-count-list">
+      {rows.map(([label, count]) => (
+        <span key={label}>
+          <strong>{label}</strong>
+          {count}
+        </span>
+      ))}
+    </div>
+  )
+}
+
+function PlanSummaryView({ summary, columns }) {
+  return (
+    <>
+      <section className="panel-card mb-4">
+        <div className="panel-card-header">
+          <span>
+            <i className="bi bi-clipboard-check text-primary" /> Plan message
+          </span>
+          <small className="text-secondary">
+            {summary.currentDay
+              ? `${summary.currentDay} · ${summary.currentDayRows.length} line-in vehicles`
+              : 'No current-day line-in plan available'}
+          </small>
+        </div>
+        <div className="panel-card-body">
+          <div className="plan-summary-grid">
+            <div className="plan-summary-card">
+              <h6>BUS orders</h6>
+              <strong>{summary.bus.total}</strong>
+              <CountList counts={summary.bus.modelCounts} />
+              <p>Podest opening FG: <b>{summary.bus.podestOpeningFg}</b></p>
+            </div>
+            <div className="plan-summary-card">
+              <h6>Rapid Prime</h6>
+              <strong>{summary.rapidPrime.total}</strong>
+              <CountList counts={summary.rapidPrime.modelCounts} />
+            </div>
+            <div className="plan-summary-card">
+              <h6>Vajra</h6>
+              <strong>{summary.vajra.total}</strong>
+              <CountList counts={summary.vajra.modelCounts} />
+            </div>
+            <div className="plan-summary-card">
+              <h6>Special variants</h6>
+              <div className="plan-count-list">
+                {summary.variantCounts.map((item) => (
+                  <span key={item.label}>
+                    <strong>{item.label}</strong>
+                    {item.count}
+                  </span>
+                ))}
+                <span>
+                  <strong>BRO</strong>
+                  {summary.broCount}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section className="panel-card mb-4">
+        <div className="panel-card-header">
+          <span>
+            <i className="bi bi-list-check text-primary" /> Current-day line-in vehicle list
+          </span>
+          <small className="text-secondary">Opening report rows for the current production day</small>
+        </div>
+        <div className="panel-card-body p-0">
+          <div className="preview-table-wrap">
+            <table className="table table-bordered table-hover mb-0 data-table preview-table">
+              <thead>
+                <tr>
+                  {columns.map((column) => (
+                    <th key={column} className={SEQUENCE_COLUMNS.includes(column) ? 'sequence-head' : ''}>
+                      {column}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {summary.currentDayRows.length > 0 ? (
+                  summary.currentDayRows.map((row, rowIndex) => {
+                    const shortageCount = getShortageCount(row)
+                    return (
+                      <tr key={`plan-${rowIndex}-${row['Serial Number'] || row.Serial || rowIndex}`} className={getPreviewRowClass(shortageCount)}>
+                        {columns.map((column) => (
+                          <td key={`${column}-${rowIndex}`} className={getTableCellClass(column, row[column] ?? '', shortageCount)}>
+                            {String(row[column] ?? '')}
+                          </td>
+                        ))}
+                      </tr>
+                    )
+                  })
+                ) : (
+                  <tr>
+                    <td colSpan={columns.length || 1} className="text-center text-secondary py-4">
+                      No current-day line-in vehicles found.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </>
+  )
+}
+
 function App() {
   const fileInputId = useId()
   const shortageBatchInputId = useId()
@@ -1465,6 +1917,7 @@ function App() {
   const [reportUploadedAt, setReportUploadedAt] = useState({ opening: null, mod: null })
   const [modStartSequence, setModStartSequence] = useState('')
   const [engineStatusFile, setEngineStatusFile] = useState(null)
+  const [axleStatusFile, setAxleStatusFile] = useState(null)
   const [dragActiveReport, setDragActiveReport] = useState(null)
   const [capacity, setCapacity] = useState('')
   const [startDate, setStartDate] = useState('')
@@ -1493,6 +1946,10 @@ function App() {
   }, {})
   const analysis = analyses[activeReport] ?? analyses.opening ?? analyses.mod
   const availableReports = Object.keys(REPORT_TYPES).filter((reportKey) => analyses[reportKey])
+  const availableReportViews = lineType === 'HDT' && analyses.opening
+    ? [...availableReports, 'plan']
+    : availableReports
+  const activeViewType = ANALYTICS_VIEW_TYPES[activeReport] ?? REPORT_TYPES.opening
   const modUploadedAt =
     reportUploadedAt.mod ??
     (reportFiles.mod?.lastModified ? new Date(reportFiles.mod.lastModified).toISOString() : null)
@@ -1527,6 +1984,8 @@ function App() {
       : new Set()
   const previewWithReasons = applySkipHoldReasons(sequencedPreview, analysis, reasonConfig, releasedHoldKeys)
   const deferredPreviewRows = useDeferredValue(previewWithReasons.rows)
+  const currentDayStatusSummary = buildCurrentDayStatusSummary(previewWithReasons.rows, lineType)
+  const planSummary = buildPlanSummary(openingSequencedPreview.rows, analyses.opening?.previewColumns ?? [])
   const inferenceCards = buildInference(sequencedPreview.rows, analysis?.summary?.shortage_parts ?? [], shortagePartNames)
 
   useEffect(() => {
@@ -1550,6 +2009,7 @@ function App() {
           setReportUploadedAt(workspace.reportUploadedAt ?? { opening: null, mod: null })
           setModStartSequence(workspace.modStartSequence ?? '')
           setEngineStatusFile(workspace.engineStatusFile ?? null)
+          setAxleStatusFile(workspace.axleStatusFile ?? null)
           setCapacity(workspace.capacity ?? '')
           setStartDate(workspace.startDate ?? '')
           setHolidayInput(workspace.holidayInput ?? '')
@@ -1586,6 +2046,7 @@ function App() {
         reportUploadedAt,
         modStartSequence,
         engineStatusFile,
+        axleStatusFile,
         capacity,
         startDate,
         holidayInput,
@@ -1603,7 +2064,7 @@ function App() {
     return () => {
       window.clearTimeout(workspaceSaveTimerRef.current)
     }
-  }, [lineType, reportFiles, reportUploadedAt, modStartSequence, engineStatusFile, capacity, startDate, holidayInput, holidays, shortages, analyses, activeReport, reasonConfig])
+  }, [lineType, reportFiles, reportUploadedAt, modStartSequence, engineStatusFile, axleStatusFile, capacity, startDate, holidayInput, holidays, shortages, analyses, activeReport, reasonConfig])
 
   function pushToast(message, type = 'danger') {
     toastCounterRef.current += 1
@@ -1663,10 +2124,19 @@ function App() {
     if (activeReport === reportKey) {
       setActiveReport('opening')
     }
+    if (activeReport === 'plan') {
+      setActiveReport('opening')
+    }
   }
 
   function updateEngineStatusFile(file) {
     setEngineStatusFile(file)
+    setAnalyses({ opening: null, mod: null })
+    setActiveReport('opening')
+  }
+
+  function updateAxleStatusFile(file) {
+    setAxleStatusFile(file)
     setAnalyses({ opening: null, mod: null })
     setActiveReport('opening')
   }
@@ -1700,6 +2170,7 @@ function App() {
     setReportUploadedAt({ opening: null, mod: null })
     setModStartSequence('')
     setEngineStatusFile(null)
+    setAxleStatusFile(null)
     setDragActiveReport(null)
     setCapacity('')
     setStartDate('')
@@ -1793,8 +2264,12 @@ function App() {
   function buildAnalysisFormData(file, options = {}) {
     const formData = new FormData()
     formData.append('file', file)
+    formData.append('line_type', lineType)
     if (engineStatusFile) {
       formData.append('engine_status_file', engineStatusFile)
+    }
+    if (axleStatusFile) {
+      formData.append('axle_status_file', axleStatusFile)
     }
 
     for (const key of options.openingHoldKeys ?? []) {
@@ -2184,35 +2659,71 @@ function App() {
                   </div>
                 </div>
 
-                <label
-                  htmlFor={`${fileInputId}-engine-status`}
-                  className={`report-upload-card engine-status-upload ${dragActiveReport === 'engine-status' ? 'drag-active' : ''}`}
-                  onDragOver={(event) => {
-                    event.preventDefault()
-                    setDragActiveReport('engine-status')
-                  }}
-                  onDragLeave={() => setDragActiveReport(null)}
-                  onDrop={(event) => {
-                    event.preventDefault()
-                    setDragActiveReport(null)
-                    const file = event.dataTransfer.files?.[0]
-                    if (file) {
-                      updateEngineStatusFile(file)
-                    }
-                  }}
-                >
-                  <i className="bi bi-gear-wide-connected upload-icon" />
-                  <span className="upload-title">Engine &amp; Transmission Status Report</span>
-                  <span className="upload-copy">Maps Column C order number to Column J engine and Column L transmission status.</span>
-                  <strong className="upload-file">{engineStatusFile?.name || 'No status report selected'}</strong>
-                </label>
-                <input
-                  id={`${fileInputId}-engine-status`}
-                  type="file"
-                  accept=".xlsx,.xls,.csv"
-                  className="d-none"
-                  onChange={(event) => updateEngineStatusFile(event.target.files?.[0] ?? null)}
-                />
+                <div className="report-upload-grid auxiliary-report-grid mt-3">
+                  <div>
+                    <label
+                      htmlFor={`${fileInputId}-engine-status`}
+                      className={`report-upload-card engine-status-upload ${dragActiveReport === 'engine-status' ? 'drag-active' : ''}`}
+                      onDragOver={(event) => {
+                        event.preventDefault()
+                        setDragActiveReport('engine-status')
+                      }}
+                      onDragLeave={() => setDragActiveReport(null)}
+                      onDrop={(event) => {
+                        event.preventDefault()
+                        setDragActiveReport(null)
+                        const file = event.dataTransfer.files?.[0]
+                        if (file) {
+                          updateEngineStatusFile(file)
+                        }
+                      }}
+                    >
+                      <i className="bi bi-gear-wide-connected upload-icon" />
+                      <span className="upload-title">Engine &amp; Transmission</span>
+                      <span className="upload-copy">Column C to J/L status.</span>
+                      <strong className="upload-file">{engineStatusFile?.name || 'No status report selected'}</strong>
+                    </label>
+                    <input
+                      id={`${fileInputId}-engine-status`}
+                      type="file"
+                      accept=".xlsx,.xls,.csv"
+                      className="d-none"
+                      onChange={(event) => updateEngineStatusFile(event.target.files?.[0] ?? null)}
+                    />
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor={`${fileInputId}-axle-status`}
+                      className={`report-upload-card engine-status-upload ${dragActiveReport === 'axle-status' ? 'drag-active' : ''}`}
+                      onDragOver={(event) => {
+                        event.preventDefault()
+                        setDragActiveReport('axle-status')
+                      }}
+                      onDragLeave={() => setDragActiveReport(null)}
+                      onDrop={(event) => {
+                        event.preventDefault()
+                        setDragActiveReport(null)
+                        const file = event.dataTransfer.files?.[0]
+                        if (file) {
+                          updateAxleStatusFile(file)
+                        }
+                      }}
+                    >
+                      <i className="bi bi-circle-square upload-icon" />
+                      <span className="upload-title">Axle Status</span>
+                      <span className="upload-copy">Column B to E color status.</span>
+                      <strong className="upload-file">{axleStatusFile?.name || 'No axle status report selected'}</strong>
+                    </label>
+                    <input
+                      id={`${fileInputId}-axle-status`}
+                      type="file"
+                      accept=".xlsx,.xlsm"
+                      className="d-none"
+                      onChange={(event) => updateAxleStatusFile(event.target.files?.[0] ?? null)}
+                    />
+                  </div>
+                </div>
 
                 <div className="action-row">
                   <button className="btn btn-outline-secondary btn-sm px-3" type="button" onClick={resetAll}>
@@ -2232,10 +2743,6 @@ function App() {
                     )}
                   </button>
                 </div>
-
-                <div className="upload-hint">
-                  Backend target: <code>/api/analyze</code>
-                </div>
               </div>
             </div>
           </div>
@@ -2246,11 +2753,11 @@ function App() {
             <section className="report-view-panel" aria-label="Report analytics selector">
               <div>
                 <span className="line-type-kicker">Analytics view</span>
-                <h2>{REPORT_TYPES[activeReport].title}</h2>
-                <p>{REPORT_TYPES[activeReport].copy}</p>
+                <h2>{activeViewType.title}</h2>
+                <p>{activeViewType.copy}</p>
               </div>
               <div className="report-view-actions" role="group" aria-label="Select report analytics">
-                {availableReports.map((reportKey) => (
+                {availableReportViews.map((reportKey) => (
                   <button
                     key={reportKey}
                     type="button"
@@ -2258,14 +2765,18 @@ function App() {
                     onClick={() => setActiveReport(reportKey)}
                     aria-pressed={activeReport === reportKey}
                   >
-                    {REPORT_TYPES[reportKey].shortTitle}
+                    {ANALYTICS_VIEW_TYPES[reportKey].shortTitle}
                   </button>
                 ))}
               </div>
             </section>
 
+            {activeReport === 'plan' ? (
+              <PlanSummaryView summary={planSummary} columns={openingSequencedPreview.columns} />
+            ) : (
+              <>
             <section className="row g-3 mb-4 mt-1">
-              <StatCard label="Total Hold Orders" value={analysis.summary.total_hold || 0} tone="hold" icon="bi-pause-circle" />
+              <StatCard label="PBS HOLD" value={analysis.summary.total_hold || 0} tone="hold" icon="bi-pause-circle" />
               <StatCard
                 label="Total Skip Orders"
                 value={analysis.summary.total_skipped || 0}
@@ -2457,7 +2968,7 @@ function App() {
                         {previewWithReasons.columns.map((column) => (
                           <th
                             key={column}
-                            className={['Line in sequence', 'Production Date', 'Line in time'].includes(column) ? 'sequence-head' : ''}
+                            className={SEQUENCE_COLUMNS.includes(column) ? 'sequence-head' : ''}
                           >
                             {column}
                           </th>
@@ -2484,6 +2995,68 @@ function App() {
                     </tbody>
                   </table>
                 </div>
+              </div>
+            </section>
+
+            <section className="panel-card mb-4">
+              <div className="panel-card-header">
+                <span>
+                  <i className="bi bi-clipboard2-data text-primary" /> AGGREGATE STATUS AGAINST DELIVERY
+                </span>
+                <small className="text-secondary">
+                  {currentDayStatusSummary.currentDay
+                    ? `${currentDayStatusSummary.currentDay} · ${currentDayStatusSummary.rowCount} scheduled rows`
+                    : 'No scheduled production day available'}
+                </small>
+              </div>
+              <div className="panel-card-body">
+                {lineType === 'HDT' ? (
+                  <div className="status-shift-groups">
+                    {currentDayStatusSummary.shifts.map((shift) => (
+                      <div className="status-shift-group" key={shift.label}>
+                        <div className="status-shift-header">
+                          <strong>{shift.label}</strong>
+                          <span>{shift.rowCount} Vehicles in sequence</span>
+                        </div>
+                        <div className="status-summary-grid">
+                          <StatusSummaryTable
+                            title="Engine status"
+                            column="Engine status"
+                            rows={shift.engine}
+                          />
+                          <StatusSummaryTable
+                            title="Transmission status"
+                            column="Transmission status"
+                            rows={shift.transmission}
+                          />
+                          <StatusSummaryTable
+                            title="Axle status"
+                            column="Axle status"
+                            rows={shift.axle}
+                          />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="status-summary-grid">
+                    <StatusSummaryTable
+                      title="Engine status"
+                      column="Engine status"
+                      rows={currentDayStatusSummary.engine}
+                    />
+                    <StatusSummaryTable
+                      title="Transmission status"
+                      column="Transmission status"
+                      rows={currentDayStatusSummary.transmission}
+                    />
+                    <StatusSummaryTable
+                      title="Axle status"
+                      column="Axle status"
+                      rows={currentDayStatusSummary.axle}
+                    />
+                  </div>
+                )}
               </div>
             </section>
 
@@ -2564,6 +3137,8 @@ function App() {
                 </div>
               </section>
             ) : null}
+              </>
+            )}
           </div>
         ) : null}
       </main>
