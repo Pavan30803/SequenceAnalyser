@@ -79,6 +79,7 @@ const SKIP_TABLE_COLUMNS = [
   ['State', 'vehicle_order_state'],
   ['Vehicle Start Time', 'vehicle_start_time'],
 ]
+const WITHOUT_WORK_CONTENT = (columns) => columns.filter(([label, field]) => label !== 'Work Content' && field !== 'work_content')
 const PIE_HOLD_COLORS = ['#d9485f', '#f08949', '#ef7d95', '#5f50cf', '#15938f', '#3c91e6', '#9aa8bc', '#ffc34d']
 const PIE_SKIP_COLORS = ['#ffc145', '#3cb371', '#3c91e6', '#2ec4b6', '#7c4dff', '#ef476f', '#ff8c42', '#9aa8bc']
 const REASON_COLUMN = 'Skip/hold reason'
@@ -100,6 +101,39 @@ const LINE_TYPES = {
     standardMinutes: 541,
     thursdayMinutes: 481,
     shiftEndMinute: 16 * 60 + 45,
+  },
+}
+const DEFAULT_SCHEDULE_SETTINGS = {
+  HDT: {
+    numberOfShifts: 2,
+    shifts: [
+      { label: 'A shift', start: '07:00', end: '16:45' },
+      { label: 'B shift', start: '16:45', end: '02:20' },
+      { label: 'C shift', start: '02:20', end: '07:00' },
+    ],
+    breaks: [
+      { id: 'morning', label: 'Morning break', type: 'Break', start: '09:30', end: '09:37' },
+      { id: 'lunch', label: 'Lunch', type: 'Lunch', start: '11:30', end: '12:00' },
+      { id: 'afternoon', label: 'Afternoon break', type: 'Break', start: '14:30', end: '14:37' },
+      { id: 'evening', label: 'Evening break', type: 'Break', start: '18:30', end: '18:37' },
+      { id: 'dinner', label: 'Dinner', type: 'Lunch', start: '20:30', end: '21:00' },
+      { id: 'midnight', label: 'Midnight break', type: 'Break', start: '00:00', end: '00:07' },
+      { id: 'thursday-stop', label: 'Thursday planned stop', type: 'Break', start: '08:30', end: '09:30', thursdayOnly: true },
+    ],
+  },
+  MDT: {
+    numberOfShifts: 1,
+    shifts: [
+      { label: 'A shift', start: '07:00', end: '16:45' },
+      { label: 'B shift', start: '16:45', end: '02:20' },
+      { label: 'C shift', start: '02:20', end: '07:00' },
+    ],
+    breaks: [
+      { id: 'morning', label: 'Morning break', type: 'Break', start: '09:30', end: '09:37' },
+      { id: 'lunch', label: 'Lunch', type: 'Lunch', start: '11:30', end: '12:00' },
+      { id: 'afternoon', label: 'Afternoon break', type: 'Break', start: '14:30', end: '14:37' },
+      { id: 'thursday-stop', label: 'Thursday planned stop', type: 'Break', start: '08:30', end: '09:30', thursdayOnly: true },
+    ],
   },
 }
 const REPORT_TYPES = {
@@ -208,6 +242,95 @@ function clearWorkspace(lineType) {
   return transactWorkspace('readwrite', (store) => store.delete(getWorkspaceKey(lineType)))
 }
 
+function createDefaultScheduleSettings(lineType = 'HDT') {
+  const defaults = DEFAULT_SCHEDULE_SETTINGS[lineType] ?? DEFAULT_SCHEDULE_SETTINGS.HDT
+  return structuredClone(defaults)
+}
+
+function parseTimeToMinutes(value) {
+  const match = String(value ?? '').match(/^(\d{1,2}):(\d{2})$/)
+  if (!match) {
+    return null
+  }
+  const hours = Number.parseInt(match[1], 10)
+  const minutes = Number.parseInt(match[2], 10)
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes) || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
+    return null
+  }
+  return hours * 60 + minutes
+}
+
+function normalizeEndMinute(startMinute, endMinute) {
+  if (startMinute === null || endMinute === null) {
+    return null
+  }
+  return endMinute <= startMinute ? endMinute + 24 * 60 : endMinute
+}
+
+function getActiveScheduleShifts(lineType, scheduleSettings) {
+  const settings = scheduleSettings ?? createDefaultScheduleSettings(lineType)
+  const count = Math.min(Math.max(Number.parseInt(settings.numberOfShifts, 10) || 1, 1), 3)
+
+  return (settings.shifts ?? [])
+    .slice(0, count)
+    .map((shift, index) => {
+      const startMinute = parseTimeToMinutes(shift.start)
+      const rawEndMinute = parseTimeToMinutes(shift.end)
+      const endMinute = normalizeEndMinute(startMinute, rawEndMinute)
+
+      return {
+        ...shift,
+        label: shift.label || `${String.fromCharCode(65 + index)} shift`,
+        startMinute,
+        endMinute,
+      }
+    })
+    .filter((shift) => shift.startMinute !== null && shift.endMinute !== null && shift.endMinute > shift.startMinute)
+}
+
+function getScheduleProfile(lineType, productionDate, scheduleSettings) {
+  const fallbackConfig = LINE_TYPES[lineType] ?? LINE_TYPES.HDT
+  const shifts = getActiveScheduleShifts(lineType, scheduleSettings)
+  const startMinute = shifts[0]?.startMinute ?? 7 * 60
+  const endMinute = shifts.length ? shifts[shifts.length - 1].endMinute : fallbackConfig.shiftEndMinute
+  const breaks = (scheduleSettings?.breaks ?? createDefaultScheduleSettings(lineType).breaks)
+    .filter((breakWindow) => !breakWindow.thursdayOnly || productionDate.getDay() === 4)
+    .map((breakWindow) => {
+      const start = parseTimeToMinutes(breakWindow.start)
+      const rawEnd = parseTimeToMinutes(breakWindow.end)
+      if (start === null || rawEnd === null) {
+        return null
+      }
+      let normalizedStart = start
+      if (normalizedStart < startMinute && endMinute > 24 * 60) {
+        normalizedStart += 24 * 60
+      }
+      let normalizedEnd = rawEnd <= start ? rawEnd + 24 * 60 : rawEnd
+      if (normalizedEnd <= startMinute && endMinute > 24 * 60) {
+        normalizedEnd += 24 * 60
+      }
+      if (normalizedEnd <= startMinute || normalizedStart >= endMinute || normalizedEnd <= normalizedStart) {
+        return null
+      }
+      return {
+        start: Math.max(normalizedStart, startMinute),
+        end: Math.min(normalizedEnd, endMinute),
+      }
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.start - b.start)
+  const breakMinutes = breaks.reduce((total, breakWindow) => total + Math.max(0, breakWindow.end - breakWindow.start), 0)
+  const totalMinutes = Math.max(1, endMinute - startMinute - breakMinutes)
+
+  return {
+    shifts,
+    startMinute,
+    endMinute,
+    breaks,
+    totalMinutes,
+  }
+}
+
 function createReasonBucket() {
   return {
     groupBy: 'model',
@@ -263,11 +386,15 @@ function escapeCsvValue(value) {
   return `"${String(value ?? '').replaceAll('"', '""')}"`
 }
 
-function triggerDownload(fileName, columns, rows) {
-  const csv = [
+function buildCsvText(columns, rows) {
+  return [
     columns.map(escapeCsvValue).join(','),
     ...rows.map((row) => columns.map((column) => escapeCsvValue(row[column])).join(',')),
   ].join('\n')
+}
+
+function triggerDownload(fileName, columns, rows) {
+  const csv = buildCsvText(columns, rows)
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
   const url = URL.createObjectURL(blob)
   const link = document.createElement('a')
@@ -631,19 +758,6 @@ function formatLineTime(date) {
   return `${hours}:${minutes} ${meridiem}`
 }
 
-const DAY_SHIFT_BREAKS = [
-  { start: 9 * 60 + 30, end: 9 * 60 + 37 },
-  { start: 11 * 60 + 30, end: 12 * 60 },
-  { start: 14 * 60 + 30, end: 14 * 60 + 37 },
-]
-const THURSDAY_PLANNED_STOP = { start: 8 * 60 + 30, end: 9 * 60 + 30 }
-const HDT_EXTENDED_SHIFT_BREAKS = [
-  ...DAY_SHIFT_BREAKS,
-  { start: 18 * 60 + 30, end: 18 * 60 + 37 },
-  { start: 20 * 60 + 30, end: 21 * 60 },
-  { start: 24 * 60, end: 24 * 60 + 7 },
-]
-
 function createShiftTime(productionDate, minutesFromMidnight) {
   const date = new Date(productionDate)
   date.setHours(0, 0, 0, 0)
@@ -651,16 +765,15 @@ function createShiftTime(productionDate, minutesFromMidnight) {
   return date
 }
 
-function getShiftStartTime(productionDate) {
-  return createShiftTime(productionDate, 7 * 60)
+function getShiftStartTime(productionDate, lineType, scheduleSettings) {
+  return createShiftTime(productionDate, getScheduleProfile(lineType, productionDate, scheduleSettings).startMinute)
 }
 
-function getShiftEndTime(productionDate, lineType) {
-  const lineConfig = LINE_TYPES[lineType] ?? LINE_TYPES.HDT
-  return createShiftTime(productionDate, lineConfig.shiftEndMinute)
+function getShiftEndTime(productionDate, lineType, scheduleSettings) {
+  return createShiftTime(productionDate, getScheduleProfile(lineType, productionDate, scheduleSettings).endMinute)
 }
 
-function getProductionDateFromTimestamp(timestamp, lineType) {
+function getProductionDateFromTimestamp(timestamp, lineType, scheduleSettings) {
   const uploadTime = new Date(timestamp)
   if (Number.isNaN(uploadTime.getTime())) {
     return null
@@ -669,29 +782,29 @@ function getProductionDateFromTimestamp(timestamp, lineType) {
   const productionDate = new Date(uploadTime)
   productionDate.setHours(0, 0, 0, 0)
   const minutesFromMidnight = uploadTime.getHours() * 60 + uploadTime.getMinutes()
-  const lineConfig = LINE_TYPES[lineType] ?? LINE_TYPES.HDT
+  const profile = getScheduleProfile(lineType, productionDate, scheduleSettings)
 
-  if (lineConfig.shiftEndMinute > 24 * 60 && minutesFromMidnight < lineConfig.shiftEndMinute - 24 * 60) {
+  if (profile.endMinute > 24 * 60 && minutesFromMidnight < profile.endMinute - 24 * 60) {
     productionDate.setDate(productionDate.getDate() - 1)
   }
 
   return productionDate
 }
 
-function getModStartTime(uploadedAt, holidays, lineType) {
+function getModStartTime(uploadedAt, holidays, lineType, scheduleSettings) {
   const uploadTime = new Date(uploadedAt)
   if (Number.isNaN(uploadTime.getTime())) {
     return null
   }
 
-  let productionDate = getProductionDateFromTimestamp(uploadTime, lineType)
+  let productionDate = getProductionDateFromTimestamp(uploadTime, lineType, scheduleSettings)
   if (!productionDate) {
     return null
   }
 
   let currentTime = new Date(uploadTime)
-  let shiftStart = getShiftStartTime(productionDate)
-  let shiftEnd = getShiftEndTime(productionDate, lineType)
+  let shiftStart = getShiftStartTime(productionDate, lineType, scheduleSettings)
+  let shiftEnd = getShiftEndTime(productionDate, lineType, scheduleSettings)
 
   if (currentTime < shiftStart) {
     currentTime = new Date(shiftStart)
@@ -700,40 +813,35 @@ function getModStartTime(uploadedAt, holidays, lineType) {
   if (currentTime >= shiftEnd) {
     productionDate.setDate(productionDate.getDate() + 1)
     productionDate = getNextWorkingDay(productionDate, holidays)
-    shiftStart = getShiftStartTime(productionDate)
-    shiftEnd = getShiftEndTime(productionDate, lineType)
+    shiftStart = getShiftStartTime(productionDate, lineType, scheduleSettings)
+    shiftEnd = getShiftEndTime(productionDate, lineType, scheduleSettings)
     currentTime = new Date(shiftStart)
   }
 
-  currentTime = skipProductionBreaks(currentTime, productionDate, lineType)
+  currentTime = skipProductionBreaks(currentTime, productionDate, lineType, scheduleSettings)
   if (currentTime >= shiftEnd) {
     productionDate.setDate(productionDate.getDate() + 1)
     productionDate = getNextWorkingDay(productionDate, holidays)
-    currentTime = getShiftStartTime(productionDate)
+    currentTime = getShiftStartTime(productionDate, lineType, scheduleSettings)
   }
 
   return { productionDate, currentTime }
 }
 
-function getBreakWindows(productionDate, lineType) {
-  const baseBreaks = lineType === 'MDT' ? DAY_SHIFT_BREAKS : HDT_EXTENDED_SHIFT_BREAKS
-  const breaks = productionDate.getDay() === 4
-    ? [...baseBreaks, THURSDAY_PLANNED_STOP].sort((a, b) => a.start - b.start)
-    : baseBreaks
-
-  return breaks.map((breakWindow) => ({
+function getBreakWindows(productionDate, lineType, scheduleSettings) {
+  return getScheduleProfile(lineType, productionDate, scheduleSettings).breaks.map((breakWindow) => ({
     start: createShiftTime(productionDate, breakWindow.start),
     end: createShiftTime(productionDate, breakWindow.end),
   }))
 }
 
-function skipProductionBreaks(date, productionDate, lineType) {
+function skipProductionBreaks(date, productionDate, lineType, scheduleSettings) {
   let adjustedDate = new Date(date)
   let moved = true
 
   while (moved) {
     moved = false
-    for (const breakWindow of getBreakWindows(productionDate, lineType)) {
+    for (const breakWindow of getBreakWindows(productionDate, lineType, scheduleSettings)) {
       if (adjustedDate >= breakWindow.start && adjustedDate < breakWindow.end) {
         adjustedDate = new Date(breakWindow.end)
         moved = true
@@ -745,12 +853,12 @@ function skipProductionBreaks(date, productionDate, lineType) {
   return adjustedDate
 }
 
-function addProductionMinutes(date, minutes, productionDate, lineType) {
-  let currentTime = skipProductionBreaks(date, productionDate, lineType)
+function addProductionMinutes(date, minutes, productionDate, lineType, scheduleSettings) {
+  let currentTime = skipProductionBreaks(date, productionDate, lineType, scheduleSettings)
   let remainingMinutes = minutes
 
   while (remainingMinutes > 0) {
-    const nextBreak = getBreakWindows(productionDate, lineType).find((breakWindow) => currentTime < breakWindow.end)
+    const nextBreak = getBreakWindows(productionDate, lineType, scheduleSettings).find((breakWindow) => currentTime < breakWindow.end)
     if (!nextBreak) {
       return new Date(currentTime.getTime() + remainingMinutes * 60000)
     }
@@ -762,23 +870,29 @@ function addProductionMinutes(date, minutes, productionDate, lineType) {
 
     const minutesUntilBreak = (nextBreak.start.getTime() - currentTime.getTime()) / 60000
     if (remainingMinutes <= minutesUntilBreak) {
-      return skipProductionBreaks(new Date(currentTime.getTime() + remainingMinutes * 60000), productionDate, lineType)
+      return skipProductionBreaks(new Date(currentTime.getTime() + remainingMinutes * 60000), productionDate, lineType, scheduleSettings)
     }
 
     remainingMinutes -= minutesUntilBreak
     currentTime = new Date(nextBreak.end)
   }
 
-  return skipProductionBreaks(currentTime, productionDate, lineType)
+  return skipProductionBreaks(currentTime, productionDate, lineType, scheduleSettings)
 }
 
-function applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType = 'HDT', baselineRows = []) {
-  const lineConfig = LINE_TYPES[lineType] ?? LINE_TYPES.HDT
+function getDayCapacity(baseCapacity, currentDayMinutes, standardMinutes) {
+  return currentDayMinutes === standardMinutes
+    ? baseCapacity
+    : Math.max(1, Math.floor(baseCapacity * (currentDayMinutes / standardMinutes)))
+}
+
+function applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType = 'HDT', baselineRows = [], scheduleSettings) {
   const [year, month, day] = startDate.split('-').map((value) => Number.parseInt(value, 10))
   let currentDate = getNextWorkingDay(new Date(year, month - 1, day), holidays)
   let releaseStarted = false
   let releaseCounter = 1
   let todayCapacity = baseCapacity
+  const standardMinutes = getScheduleProfile(lineType, currentDate, scheduleSettings).totalMinutes
   const releaseBaseline = buildReleaseSequenceBaseline(baselineRows)
   const hasReleaseBaseline = releaseBaseline.size > 0
 
@@ -799,10 +913,7 @@ function applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType 
     }
 
     if (releaseCounter === 1) {
-      todayCapacity =
-        currentDate.getDay() === 4
-          ? Math.floor(baseCapacity * (lineConfig.thursdayMinutes / lineConfig.standardMinutes))
-          : baseCapacity
+      todayCapacity = getDayCapacity(baseCapacity, getScheduleProfile(lineType, currentDate, scheduleSettings).totalMinutes, standardMinutes)
     }
 
     row[RELEASE_SEQUENCE_COLUMN] = releaseCounter
@@ -823,6 +934,7 @@ function applySequence(
   startDate,
   holidays,
   lineType = 'HDT',
+  scheduleSettings,
   baselineRows = [],
   modUploadedAt = null,
   modStartSequence = '',
@@ -871,24 +983,21 @@ function applySequence(
   }
 
   const rows = structuredClone(previewData)
-  const lineConfig = LINE_TYPES[lineType] ?? LINE_TYPES.HDT
-  const standardTotalMinutes = lineConfig.standardMinutes
-  const thursdayTotalMinutes = lineConfig.thursdayMinutes
+  const standardTotalMinutes = getScheduleProfile(lineType, currentDate, scheduleSettings).totalMinutes
   const baseline = buildSequenceBaseline(baselineRows)
   let counter = 1
   let sequenceStarted = false
   let currentDayMinutes = standardTotalMinutes
   let todayCapacity = baseCapacity
   let taktTime = currentDayMinutes / todayCapacity
-  let currentTime = new Date(currentDate)
-  currentTime.setHours(7, 0, 0, 0)
+  let currentTime = getShiftStartTime(currentDate, lineType, scheduleSettings)
 
   if (baseline.size > 0 && modUploadedAt) {
     const firstTrimIndex = rows.findIndex((row) => {
       const status = String(row.Status ?? '').trim().toUpperCase()
       return status === 'TRIM LINE' && !modSkipKeys.has(getPreviewVehicleKey(row))
     })
-    const modStart = getModStartTime(modUploadedAt, holidays, lineType)
+    const modStart = getModStartTime(modUploadedAt, holidays, lineType, scheduleSettings)
     const anchoredSequence = Number.parseInt(modStartSequence, 10)
 
     rows.forEach((row) => {
@@ -899,7 +1008,7 @@ function applySequence(
     })
 
     if (firstTrimIndex === -1 || !modStart || !Number.isFinite(anchoredSequence) || anchoredSequence <= 0) {
-      applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType, baselineRows)
+      applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType, baselineRows, scheduleSettings)
       return {
         columns,
         rows,
@@ -921,41 +1030,32 @@ function applySequence(
 
     for (let index = firstTrimIndex; index < rows.length; index += 1) {
       const row = rows[index]
-      currentDayMinutes = currentDate.getDay() === 4 ? thursdayTotalMinutes : standardTotalMinutes
-      todayCapacity =
-        currentDate.getDay() === 4
-          ? Math.floor(baseCapacity * (thursdayTotalMinutes / standardTotalMinutes))
-          : baseCapacity
+      currentDayMinutes = getScheduleProfile(lineType, currentDate, scheduleSettings).totalMinutes
+      todayCapacity = getDayCapacity(baseCapacity, currentDayMinutes, standardTotalMinutes)
       taktTime = currentDayMinutes / todayCapacity
 
       if (!isModStartDay && counter > todayCapacity) {
         counter = 1
         currentDate.setDate(currentDate.getDate() + 1)
         currentDate = getNextWorkingDay(currentDate, holidays)
-        currentTime = getShiftStartTime(currentDate)
-        currentDayMinutes = currentDate.getDay() === 4 ? thursdayTotalMinutes : standardTotalMinutes
-        todayCapacity =
-          currentDate.getDay() === 4
-            ? Math.floor(baseCapacity * (thursdayTotalMinutes / standardTotalMinutes))
-            : baseCapacity
+        currentTime = getShiftStartTime(currentDate, lineType, scheduleSettings)
+        currentDayMinutes = getScheduleProfile(lineType, currentDate, scheduleSettings).totalMinutes
+        todayCapacity = getDayCapacity(baseCapacity, currentDayMinutes, standardTotalMinutes)
         taktTime = currentDayMinutes / todayCapacity
       }
 
-      let shiftEnd = getShiftEndTime(currentDate, lineType)
-      currentTime = addProductionMinutes(currentTime, taktTime, currentDate, lineType)
+      let shiftEnd = getShiftEndTime(currentDate, lineType, scheduleSettings)
+      currentTime = addProductionMinutes(currentTime, taktTime, currentDate, lineType, scheduleSettings)
       if (currentTime > shiftEnd) {
         counter = 1
         currentDate.setDate(currentDate.getDate() + 1)
         currentDate = getNextWorkingDay(currentDate, holidays)
-        currentTime = getShiftStartTime(currentDate)
-        currentDayMinutes = currentDate.getDay() === 4 ? thursdayTotalMinutes : standardTotalMinutes
-        todayCapacity =
-          currentDate.getDay() === 4
-            ? Math.floor(baseCapacity * (thursdayTotalMinutes / standardTotalMinutes))
-            : baseCapacity
+        currentTime = getShiftStartTime(currentDate, lineType, scheduleSettings)
+        currentDayMinutes = getScheduleProfile(lineType, currentDate, scheduleSettings).totalMinutes
+        todayCapacity = getDayCapacity(baseCapacity, currentDayMinutes, standardTotalMinutes)
         taktTime = currentDayMinutes / todayCapacity
-        currentTime = addProductionMinutes(currentTime, taktTime, currentDate, lineType)
-        shiftEnd = getShiftEndTime(currentDate, lineType)
+        currentTime = addProductionMinutes(currentTime, taktTime, currentDate, lineType, scheduleSettings)
+        shiftEnd = getShiftEndTime(currentDate, lineType, scheduleSettings)
         isModStartDay = false
       }
 
@@ -969,12 +1069,12 @@ function applySequence(
         counter = 1
         currentDate.setDate(currentDate.getDate() + 1)
         currentDate = getNextWorkingDay(currentDate, holidays)
-        currentTime = getShiftStartTime(currentDate)
+        currentTime = getShiftStartTime(currentDate, lineType, scheduleSettings)
         isModStartDay = false
       }
     }
 
-    applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType, baselineRows)
+    applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType, baselineRows, scheduleSettings)
 
     return {
       columns,
@@ -1000,29 +1100,22 @@ function applySequence(
     }
 
     if (counter === 1) {
-      currentDayMinutes = currentDate.getDay() === 4 ? thursdayTotalMinutes : standardTotalMinutes
-      todayCapacity =
-        currentDate.getDay() === 4
-          ? Math.floor(baseCapacity * (thursdayTotalMinutes / standardTotalMinutes))
-          : baseCapacity
+      currentDayMinutes = getScheduleProfile(lineType, currentDate, scheduleSettings).totalMinutes
+      todayCapacity = getDayCapacity(baseCapacity, currentDayMinutes, standardTotalMinutes)
       taktTime = currentDayMinutes / todayCapacity
 
-      currentTime = new Date(currentDate)
-      currentTime.setHours(7, 0, 0, 0)
+      currentTime = getShiftStartTime(currentDate, lineType, scheduleSettings)
     }
 
-    currentTime = addProductionMinutes(currentTime, taktTime, currentDate, lineType)
-    if (currentTime > getShiftEndTime(currentDate, lineType)) {
+    currentTime = addProductionMinutes(currentTime, taktTime, currentDate, lineType, scheduleSettings)
+    if (currentTime > getShiftEndTime(currentDate, lineType, scheduleSettings)) {
       counter = 1
       currentDate.setDate(currentDate.getDate() + 1)
       currentDate = getNextWorkingDay(currentDate, holidays)
-      currentDayMinutes = currentDate.getDay() === 4 ? thursdayTotalMinutes : standardTotalMinutes
-      todayCapacity =
-        currentDate.getDay() === 4
-          ? Math.floor(baseCapacity * (thursdayTotalMinutes / standardTotalMinutes))
-          : baseCapacity
+      currentDayMinutes = getScheduleProfile(lineType, currentDate, scheduleSettings).totalMinutes
+      todayCapacity = getDayCapacity(baseCapacity, currentDayMinutes, standardTotalMinutes)
       taktTime = currentDayMinutes / todayCapacity
-      currentTime = addProductionMinutes(getShiftStartTime(currentDate), taktTime, currentDate, lineType)
+      currentTime = addProductionMinutes(getShiftStartTime(currentDate, lineType, scheduleSettings), taktTime, currentDate, lineType, scheduleSettings)
     }
 
     row['Line in sequence'] = counter
@@ -1037,7 +1130,7 @@ function applySequence(
     }
   }
 
-  applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType)
+  applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType, [], scheduleSettings)
 
   return {
     columns,
@@ -1228,6 +1321,18 @@ function getStatusCellClass(column, value) {
     }
   }
 
+  if (column === 'Frame status') {
+    if (status === 'COVERED') {
+      return 'cell-status-green'
+    }
+    if (status === 'YET TO START' || status === 'TO BE PROD' || status === 'WIP') {
+      return 'cell-status-orange'
+    }
+    if (status === 'PART SHORTAGE') {
+      return 'cell-status-red'
+    }
+  }
+
   return ''
 }
 
@@ -1236,8 +1341,6 @@ const ENGINE_FG_SUMMARY_STATUSES = new Set([
   'BOOKED NOT YET STORED',
   'RETRIEVAL TRIGGER RECEIVED',
 ])
-const HDT_A_SHIFT_END_MINUTE = 16 * 60 + 45
-
 function normalizeSummaryStatus(column, value) {
   const status = normalizeLookupValue(value)
 
@@ -1296,26 +1399,25 @@ function buildShiftStatusSummary(label, rows) {
     engine: buildStatusCounts(rows, 'Engine status'),
     transmission: buildStatusCounts(rows, 'Transmission status'),
     axle: buildStatusCounts(rows, 'Axle status'),
+    frame: buildStatusCounts(rows, 'Frame status'),
   }
 }
 
-function buildCurrentDayStatusSummary(rows = [], lineType = 'HDT') {
+function buildCurrentDayStatusSummary(rows = [], lineType = 'HDT', scheduleSettings) {
   const currentDay = rows.find((row) => normalizeLookupValue(row?.['Production Date']))?.['Production Date'] ?? ''
   const dayRows = currentDay
     ? rows.filter((row) => normalizeLookupValue(row?.['Production Date']) === String(currentDay))
     : []
-  const aShiftRows = lineType === 'HDT'
-    ? dayRows.filter((row) => {
-        const lineMinute = getLineTimeMinute(row?.['Line in time'])
-        return lineMinute !== null && lineMinute < HDT_A_SHIFT_END_MINUTE
-      })
+  const activeShifts = currentDay
+    ? getScheduleProfile(lineType, new Date(`${currentDay}T00:00:00`), scheduleSettings).shifts
     : []
-  const bShiftRows = lineType === 'HDT'
-    ? dayRows.filter((row) => {
-        const lineMinute = getLineTimeMinute(row?.['Line in time'])
-        return lineMinute !== null && lineMinute >= HDT_A_SHIFT_END_MINUTE
-      })
-    : []
+  const shiftSummaries = activeShifts.map((shift) => {
+    const shiftRows = dayRows.filter((row) => {
+      const lineMinute = getLineTimeMinute(row?.['Line in time'])
+      return lineMinute !== null && lineMinute >= shift.startMinute && lineMinute < shift.endMinute
+    })
+    return buildShiftStatusSummary(shift.label, shiftRows)
+  })
 
   return {
     currentDay,
@@ -1323,12 +1425,8 @@ function buildCurrentDayStatusSummary(rows = [], lineType = 'HDT') {
     engine: buildStatusCounts(dayRows, 'Engine status'),
     transmission: buildStatusCounts(dayRows, 'Transmission status'),
     axle: buildStatusCounts(dayRows, 'Axle status'),
-    shifts: lineType === 'HDT'
-      ? [
-          buildShiftStatusSummary('A shift', aShiftRows),
-          buildShiftStatusSummary('B shift', bShiftRows),
-        ]
-      : [],
+    frame: buildStatusCounts(dayRows, 'Frame status'),
+    shifts: shiftSummaries,
   }
 }
 
@@ -1399,6 +1497,39 @@ function StatusSummaryTable({ title, column, rows }) {
   )
 }
 
+function StatusSummaryGroup({ summary, includeFrame = false }) {
+  return (
+    <div className="status-summary-paired">
+      <div className="status-summary-grid">
+        <StatusSummaryTable
+          title="Engine status"
+          column="Engine status"
+          rows={summary.engine}
+        />
+        <StatusSummaryTable
+          title="Transmission status"
+          column="Transmission status"
+          rows={summary.transmission}
+        />
+      </div>
+      <div className="status-summary-grid">
+        <StatusSummaryTable
+          title="Axle status"
+          column="Axle status"
+          rows={summary.axle}
+        />
+        {includeFrame ? (
+          <StatusSummaryTable
+            title="Frame coverage"
+            column="Frame status"
+            rows={summary.frame}
+          />
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
 function StatCard({ label, value, tone, icon }) {
   return (
     <div className="col-12 col-md-6">
@@ -1420,33 +1551,31 @@ function EmptyChart({ message }) {
 function PieChartCard({ title, icon, data, emptyMessage }) {
   const hasData = data.labels.length > 0
   return (
-    <div className="col-lg-6">
-      <div className="panel-card h-100">
-        <div className="panel-card-header">
-          <span>
-            <i className={`bi ${icon}`} /> {title}
-          </span>
-        </div>
-        <div className="panel-card-body chart-body">
-          {hasData ? (
-            <Pie
-              data={data}
-              options={{
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                  legend: {
-                    position: 'right',
-                    labels: { boxWidth: 16, font: { size: 16, weight: 'bold' } },
-                  },
-                  datalabels: { display: false },
+    <div className="panel-card h-100">
+      <div className="panel-card-header">
+        <span>
+          <i className={`bi ${icon}`} /> {title}
+        </span>
+      </div>
+      <div className="panel-card-body chart-body">
+        {hasData ? (
+          <Pie
+            data={data}
+            options={{
+              responsive: true,
+              maintainAspectRatio: false,
+              plugins: {
+                legend: {
+                  position: 'right',
+                  labels: { boxWidth: 16, font: { size: 16, weight: 'bold' } },
                 },
-              }}
-            />
-          ) : (
-            <EmptyChart message={emptyMessage} />
-          )}
-        </div>
+                datalabels: { display: false },
+              },
+            }}
+          />
+        ) : (
+          <EmptyChart message={emptyMessage} />
+        )}
       </div>
     </div>
   )
@@ -1455,20 +1584,18 @@ function PieChartCard({ title, icon, data, emptyMessage }) {
 function BarChartCard({ title, icon, labels, values, colors, orders, categoryKey }) {
   const hasData = Math.max(...values, 0) > 0
   return (
-    <div className="col-sm-6 col-md-4 col-lg-2">
-      <div className="panel-card h-100 compact-card">
-        <div className="panel-card-header compact-header">
-          <span>
-            <i className={`bi ${icon}`} /> {title}
-          </span>
-        </div>
-        <div className="panel-card-body mini-chart-body">
-          {hasData ? (
-            <Bar data={buildSimpleBarData(labels, values, colors)} options={buildBarOptions(orders, categoryKey)} />
-          ) : (
-            <EmptyChart message="No data" />
-          )}
-        </div>
+    <div className="panel-card h-100 compact-card">
+      <div className="panel-card-header compact-header">
+        <span>
+          <i className={`bi ${icon}`} /> {title}
+        </span>
+      </div>
+      <div className="panel-card-body mini-chart-body">
+        {hasData ? (
+          <Bar data={buildSimpleBarData(labels, values, colors)} options={buildBarOptions(orders, categoryKey)} />
+        ) : (
+          <EmptyChart message="No data" />
+        )}
       </div>
     </div>
   )
@@ -1748,7 +1875,29 @@ function buildModelCounts(rows) {
   }, {})
 }
 
-function buildPlanSummary(rows = [], openingColumns = []) {
+function getMdtLongerWheelBaseValue(row) {
+  const description = normalizeLookupKey(getPlanRowValue(row, ['Description', 'DESCRIPTION', 'description']))
+  const hasAnyPattern = (patterns) => patterns.some((pattern) => description.includes(pattern))
+
+  if (hasAnyPattern(['3160', '3760', '4250', '4500', '3360'])) {
+    return 0
+  }
+  if (description.includes('5100')) {
+    return 0.2
+  }
+  if (hasAnyPattern(['5050', '5300', '5900'])) {
+    return 0.22
+  }
+  if (description.includes('6700')) {
+    return 0.35
+  }
+  if (description.includes('4800')) {
+    return isBusOrder(row) ? 0.22 : 0
+  }
+  return 0
+}
+
+function buildPlanSummary(rows = [], openingColumns = [], lineType = 'HDT') {
   const currentDay = rows.find((row) => normalizeLookupValue(row?.['Production Date']))?.['Production Date'] ?? ''
   const currentDayRows = currentDay
     ? rows.filter((row) => normalizeLookupValue(row?.['Production Date']) === String(currentDay) && normalizeLookupValue(row?.['Line in sequence']))
@@ -1768,8 +1917,12 @@ function buildPlanSummary(rows = [], openingColumns = []) {
   const podestOpeningFg = podestStateColumn
     ? busRows.filter((row) => normalizeLookupKey(row?.[podestStateColumn]) === 'BOOKED').length
     : 0
+  const longerWheelBaseSum = lineType === 'MDT'
+    ? currentDayRows.reduce((total, row) => total + getMdtLongerWheelBaseValue(row), 0)
+    : 0
 
   return {
+    lineType,
     currentDay,
     currentDayRows,
     bus: {
@@ -1787,6 +1940,10 @@ function buildPlanSummary(rows = [], openingColumns = []) {
     },
     variantCounts,
     broCount,
+    longerWheelBase: {
+      total: Math.ceil(longerWheelBaseSum),
+      rawTotal: longerWheelBaseSum,
+    },
   }
 }
 
@@ -1809,6 +1966,8 @@ function CountList({ counts }) {
 }
 
 function PlanSummaryView({ summary, columns }) {
+  const isMdtPlan = summary.lineType === 'MDT'
+
   return (
     <>
       <section className="panel-card mb-4">
@@ -1823,38 +1982,50 @@ function PlanSummaryView({ summary, columns }) {
           </small>
         </div>
         <div className="panel-card-body">
-          <div className="plan-summary-grid">
+          <div className={`plan-summary-grid ${isMdtPlan ? 'plan-summary-grid-mdt' : ''}`}>
             <div className="plan-summary-card">
               <h6>BUS orders</h6>
               <strong>{summary.bus.total}</strong>
               <CountList counts={summary.bus.modelCounts} />
               <p>Podest opening FG: <b>{summary.bus.podestOpeningFg}</b></p>
             </div>
-            <div className="plan-summary-card">
-              <h6>Rapid Prime</h6>
-              <strong>{summary.rapidPrime.total}</strong>
-              <CountList counts={summary.rapidPrime.modelCounts} />
-            </div>
-            <div className="plan-summary-card">
-              <h6>Vajra</h6>
-              <strong>{summary.vajra.total}</strong>
-              <CountList counts={summary.vajra.modelCounts} />
-            </div>
-            <div className="plan-summary-card">
-              <h6>Special variants</h6>
-              <div className="plan-count-list">
-                {summary.variantCounts.map((item) => (
-                  <span key={item.label}>
-                    <strong>{item.label}</strong>
-                    {item.count}
-                  </span>
-                ))}
-                <span>
-                  <strong>BRO</strong>
-                  {summary.broCount}
-                </span>
+            {isMdtPlan ? (
+              <div className="plan-summary-card">
+                <h6>Longer wheel base vehicles</h6>
+                <strong>{summary.longerWheelBase.total}</strong>
+                <p>Calculated total: <b>{summary.longerWheelBase.rawTotal.toFixed(2)}</b></p>
               </div>
-            </div>
+            ) : (
+              <>
+                <div className="plan-summary-card">
+                  <h6>Rapid Prime</h6>
+                  <strong>{summary.rapidPrime.total}</strong>
+                  <CountList counts={summary.rapidPrime.modelCounts} />
+                </div>
+                <div className="plan-summary-card">
+                  <h6>Vajra</h6>
+                  <strong>{summary.vajra.total}</strong>
+                  <CountList counts={summary.vajra.modelCounts} />
+                </div>
+              </>
+            )}
+            {!isMdtPlan ? (
+              <div className="plan-summary-card">
+                <h6>Special variants</h6>
+                <div className="plan-count-list">
+                  {summary.variantCounts.map((item) => (
+                    <span key={item.label}>
+                      <strong>{item.label}</strong>
+                      {item.count}
+                    </span>
+                  ))}
+                  <span>
+                    <strong>BRO</strong>
+                    {summary.broCount}
+                  </span>
+                </div>
+              </div>
+            ) : null}
           </div>
         </div>
       </section>
@@ -1908,6 +2079,128 @@ function PlanSummaryView({ summary, columns }) {
   )
 }
 
+function SettingsView({
+  lineType,
+  settings,
+  onBack,
+  onReset,
+  onNumberOfShiftsChange,
+  onShiftChange,
+  onBreakChange,
+}) {
+  const activeShiftCount = Math.min(Math.max(Number.parseInt(settings.numberOfShifts, 10) || 1, 1), 3)
+
+  return (
+    <main className="container-fluid px-3 px-xl-4 pb-5">
+      <section className="settings-shell">
+        <div className="settings-header">
+          <div>
+            <span className="line-type-kicker">Settings</span>
+            <h2>{LINE_TYPES[lineType].title} production timing</h2>
+            <p>Configure shift count, shift timings, breaks, and lunch windows used for sequence scheduling.</p>
+          </div>
+          <div className="settings-actions">
+            <button className="btn btn-outline-secondary btn-sm" type="button" onClick={onReset}>
+              <i className="bi bi-arrow-counterclockwise" /> Reset defaults
+            </button>
+            <button className="btn btn-primary btn-sm" type="button" onClick={onBack}>
+              <i className="bi bi-check2" /> Done
+            </button>
+          </div>
+        </div>
+
+        <div className="settings-grid">
+          <section className="panel-card">
+            <div className="panel-card-header">
+              <span><i className="bi bi-clock-history text-primary" /> Shifts</span>
+            </div>
+            <div className="panel-card-body">
+              <label className="form-label fw-semibold small">Number of Shifts</label>
+              <input
+                type="number"
+                min="1"
+                max="3"
+                className="form-control form-control-sm settings-number-input"
+                value={settings.numberOfShifts}
+                onChange={(event) => onNumberOfShiftsChange(event.target.value)}
+              />
+
+              <div className="settings-list mt-3">
+                {settings.shifts.map((shift, index) => (
+                  <div className={`settings-row ${index >= activeShiftCount ? 'muted-row' : ''}`} key={shift.label}>
+                    <strong>{shift.label}</strong>
+                    <label>
+                      <span>Start</span>
+                      <input
+                        type="time"
+                        className="form-control form-control-sm"
+                        value={shift.start}
+                        onChange={(event) => onShiftChange(index, { start: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      <span>End</span>
+                      <input
+                        type="time"
+                        className="form-control form-control-sm"
+                        value={shift.end}
+                        onChange={(event) => onShiftChange(index, { end: event.target.value })}
+                      />
+                    </label>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+
+          <section className="panel-card">
+            <div className="panel-card-header">
+              <span><i className="bi bi-cup-hot text-primary" /> Breaks and lunch</span>
+            </div>
+            <div className="panel-card-body">
+              <div className="settings-list">
+                {settings.breaks.map((breakWindow, index) => (
+                  <div className="settings-row break-row" key={breakWindow.id}>
+                    <strong>{breakWindow.label}</strong>
+                    <select
+                      className="form-select form-select-sm"
+                      value={breakWindow.type}
+                      onChange={(event) => onBreakChange(index, { type: event.target.value })}
+                    >
+                      <option>Break</option>
+                      <option>Lunch</option>
+                    </select>
+                    <label>
+                      <span>Start</span>
+                      <input
+                        type="time"
+                        className="form-control form-control-sm"
+                        value={breakWindow.start}
+                        onChange={(event) => onBreakChange(index, { start: event.target.value })}
+                      />
+                    </label>
+                    <label>
+                      <span>End</span>
+                      <input
+                        type="time"
+                        className="form-control form-control-sm"
+                        value={breakWindow.end}
+                        onChange={(event) => onBreakChange(index, { end: event.target.value })}
+                      />
+                    </label>
+                    {breakWindow.thursdayOnly ? <span className="settings-chip">Thursday only</span> : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+        </div>
+
+      </section>
+    </main>
+  )
+}
+
 function App() {
   const fileInputId = useId()
   const shortageBatchInputId = useId()
@@ -1918,10 +2211,13 @@ function App() {
   const [modStartSequence, setModStartSequence] = useState('')
   const [engineStatusFile, setEngineStatusFile] = useState(null)
   const [axleStatusFile, setAxleStatusFile] = useState(null)
+  const [frameStatusFile, setFrameStatusFile] = useState(null)
   const [dragActiveReport, setDragActiveReport] = useState(null)
   const [capacity, setCapacity] = useState('')
   const [startDate, setStartDate] = useState('')
   const [lineType] = useState(getInitialLineType)
+  const [scheduleSettings, setScheduleSettings] = useState(() => createDefaultScheduleSettings(getInitialLineType()))
+  const [showSettings, setShowSettings] = useState(false)
   const [holidayInput, setHolidayInput] = useState('')
   const [holidays, setHolidays] = useState([])
   const [shortages, setShortages] = useState([createShortageRow()])
@@ -1930,6 +2226,7 @@ function App() {
   const [reasonConfig, setReasonConfig] = useState(createReasonState)
   const [showLanding, setShowLanding] = useState(getInitialLandingState)
   const [loading, setLoading] = useState(false)
+  const [savingConstraints, setSavingConstraints] = useState(false)
   const [toasts, setToasts] = useState([])
   const resultsRef = useRef(null)
   const toastCounterRef = useRef(0)
@@ -1946,7 +2243,7 @@ function App() {
   }, {})
   const analysis = analyses[activeReport] ?? analyses.opening ?? analyses.mod
   const availableReports = Object.keys(REPORT_TYPES).filter((reportKey) => analyses[reportKey])
-  const availableReportViews = lineType === 'HDT' && analyses.opening
+  const availableReportViews = analyses.opening
     ? [...availableReports, 'plan']
     : availableReports
   const activeViewType = ANALYTICS_VIEW_TYPES[activeReport] ?? REPORT_TYPES.opening
@@ -1962,6 +2259,7 @@ function App() {
     startDate,
     holidays,
     lineType,
+    scheduleSettings,
   )
   const sequencedPreview =
     activeReport === 'mod' && analyses.mod
@@ -1972,6 +2270,7 @@ function App() {
           startDate,
           holidays,
           lineType,
+          scheduleSettings,
           openingSequencedPreview.rows,
           modUploadedAt,
           modStartSequence,
@@ -1983,10 +2282,13 @@ function App() {
       ? buildReleasedHoldKeys(openingSequencedPreview.rows, sequencedPreview.rows)
       : new Set()
   const previewWithReasons = applySkipHoldReasons(sequencedPreview, analysis, reasonConfig, releasedHoldKeys)
+  const openingPreviewWithReasons = applySkipHoldReasons(openingSequencedPreview, analyses.opening, reasonConfig)
   const deferredPreviewRows = useDeferredValue(previewWithReasons.rows)
-  const currentDayStatusSummary = buildCurrentDayStatusSummary(previewWithReasons.rows, lineType)
-  const planSummary = buildPlanSummary(openingSequencedPreview.rows, analyses.opening?.previewColumns ?? [])
+  const currentDayStatusSummary = buildCurrentDayStatusSummary(previewWithReasons.rows, lineType, scheduleSettings)
+  const planSummary = buildPlanSummary(openingSequencedPreview.rows, analyses.opening?.previewColumns ?? [], lineType)
   const inferenceCards = buildInference(sequencedPreview.rows, analysis?.summary?.shortage_parts ?? [], shortagePartNames)
+  const openingStatusSummary = buildCurrentDayStatusSummary(openingPreviewWithReasons.rows, lineType, scheduleSettings)
+  const openingInferenceCards = buildInference(openingPreviewWithReasons.rows, analyses.opening?.summary?.shortage_parts ?? [], shortagePartNames)
 
   useEffect(() => {
     if (!analysis || !resultsRef.current) {
@@ -2010,8 +2312,11 @@ function App() {
           setModStartSequence(workspace.modStartSequence ?? '')
           setEngineStatusFile(workspace.engineStatusFile ?? null)
           setAxleStatusFile(workspace.axleStatusFile ?? null)
+          setFrameStatusFile(workspace.frameStatusFile ?? null)
           setCapacity(workspace.capacity ?? '')
           setStartDate(workspace.startDate ?? '')
+          setScheduleSettings(workspace.scheduleSettings ?? createDefaultScheduleSettings(lineType))
+          setShowSettings(false)
           setHolidayInput(workspace.holidayInput ?? '')
           setHolidays(Array.isArray(workspace.holidays) ? workspace.holidays : [])
           setShortages(Array.isArray(workspace.shortages) && workspace.shortages.length ? workspace.shortages : [createShortageRow()])
@@ -2047,8 +2352,10 @@ function App() {
         modStartSequence,
         engineStatusFile,
         axleStatusFile,
+        frameStatusFile,
         capacity,
         startDate,
+        scheduleSettings,
         holidayInput,
         holidays,
         shortages,
@@ -2064,7 +2371,7 @@ function App() {
     return () => {
       window.clearTimeout(workspaceSaveTimerRef.current)
     }
-  }, [lineType, reportFiles, reportUploadedAt, modStartSequence, engineStatusFile, axleStatusFile, capacity, startDate, holidayInput, holidays, shortages, analyses, activeReport, reasonConfig])
+  }, [lineType, reportFiles, reportUploadedAt, modStartSequence, engineStatusFile, axleStatusFile, frameStatusFile, capacity, startDate, scheduleSettings, holidayInput, holidays, shortages, analyses, activeReport, reasonConfig])
 
   function pushToast(message, type = 'danger') {
     toastCounterRef.current += 1
@@ -2141,6 +2448,12 @@ function App() {
     setActiveReport('opening')
   }
 
+  function updateFrameStatusFile(file) {
+    setFrameStatusFile(file)
+    setAnalyses({ opening: null, mod: null })
+    setActiveReport('opening')
+  }
+
   function removeShortage(id) {
     setShortages((current) => {
       if (current.length === 1) {
@@ -2162,6 +2475,32 @@ function App() {
     setHolidays((current) => current.filter((holiday) => holiday !== dateKey))
   }
 
+  function updateNumberOfShifts(value) {
+    const nextValue = Math.min(Math.max(Number.parseInt(value, 10) || 1, 1), 3)
+    setScheduleSettings((current) => ({
+      ...current,
+      numberOfShifts: nextValue,
+    }))
+  }
+
+  function updateScheduleShift(index, patch) {
+    setScheduleSettings((current) => ({
+      ...current,
+      shifts: current.shifts.map((shift, shiftIndex) => (shiftIndex === index ? { ...shift, ...patch } : shift)),
+    }))
+  }
+
+  function updateScheduleBreak(index, patch) {
+    setScheduleSettings((current) => ({
+      ...current,
+      breaks: current.breaks.map((breakWindow, breakIndex) => (breakIndex === index ? { ...breakWindow, ...patch } : breakWindow)),
+    }))
+  }
+
+  function resetScheduleSettings() {
+    setScheduleSettings(createDefaultScheduleSettings(lineType))
+  }
+
   function resetAll() {
     clearWorkspace(lineType).catch(() => {
       pushToast('Saved workspace could not be cleared in this browser.', 'warning')
@@ -2171,9 +2510,12 @@ function App() {
     setModStartSequence('')
     setEngineStatusFile(null)
     setAxleStatusFile(null)
+    setFrameStatusFile(null)
     setDragActiveReport(null)
     setCapacity('')
     setStartDate('')
+    setScheduleSettings(createDefaultScheduleSettings(lineType))
+    setShowSettings(false)
     setHolidayInput('')
     setHolidays([])
     setShortages([createShortageRow()])
@@ -2271,6 +2613,9 @@ function App() {
     if (axleStatusFile) {
       formData.append('axle_status_file', axleStatusFile)
     }
+    if (lineType === 'HDT' && frameStatusFile) {
+      formData.append('frame_status_file', frameStatusFile)
+    }
 
     for (const key of options.openingHoldKeys ?? []) {
       formData.append('opening_hold_keys', key)
@@ -2329,12 +2674,72 @@ function App() {
     }
   }
 
+  async function saveConstraintsBackup() {
+    if (!analyses.opening || !openingSequencedPreview.rows.length) {
+      pushToast('Analyze the opening report before saving constraints.', 'warning')
+      return
+    }
+
+    const mappedColumns = lineType === 'MDT'
+      ? openingPreviewWithReasons.columns.filter((column) => column !== 'Work Content')
+      : openingPreviewWithReasons.columns
+    const formData = new FormData()
+    const mappedCsv = buildCsvText(mappedColumns, openingPreviewWithReasons.rows)
+    formData.append('line_type', lineType)
+    formData.append('mapped_columns', JSON.stringify(mappedColumns))
+    formData.append('mapped_report_file', new Blob([mappedCsv], { type: 'text/csv;charset=utf-8;' }), 'Mapped_Day_Opening_Report.csv')
+    formData.append('summary', JSON.stringify(analyses.opening.summary ?? {}))
+    formData.append('status_summary', JSON.stringify(openingStatusSummary))
+    formData.append('inference_cards', JSON.stringify(openingInferenceCards))
+
+    if (reportFiles.opening) {
+      formData.append('opening_report_file', reportFiles.opening)
+    }
+    if (reportFiles.mod) {
+      formData.append('mod_report_file', reportFiles.mod)
+    }
+    if (engineStatusFile) {
+      formData.append('engine_status_file', engineStatusFile)
+    }
+    if (axleStatusFile) {
+      formData.append('axle_status_file', axleStatusFile)
+    }
+    if (lineType === 'HDT' && frameStatusFile) {
+      formData.append('frame_status_file', frameStatusFile)
+    }
+    for (const shortage of shortages) {
+      if (shortage.file) {
+        formData.append('shortage_files', shortage.file)
+      }
+    }
+
+    setSavingConstraints(true)
+    try {
+      const response = await fetch('/api/save-constraints', { method: 'POST', body: formData })
+      const responseText = await response.text()
+      let result = {}
+      try {
+        result = responseText ? JSON.parse(responseText) : {}
+      } catch {
+        throw new Error(`Server returned a non-JSON response. Restart the backend and try again. Status: ${response.status}`)
+      }
+      if (!response.ok || result.error) {
+        throw new Error(result.error || 'Backup could not be saved.')
+      }
+      pushToast(`Constraints backup saved: ${result.folder}`, 'success')
+    } catch (error) {
+      pushToast(`Save failed: ${error.message}`, 'danger')
+    } finally {
+      setSavingConstraints(false)
+    }
+  }
+
   function downloadPreview() {
     if (!previewWithReasons.columns.length || !previewWithReasons.rows.length) {
       pushToast('No sequence data available to download.', 'warning')
       return
     }
-    triggerDownload('Sequenced_Production_Report.csv', previewWithReasons.columns, previewWithReasons.rows)
+    triggerDownload('Sequenced_Production_Report.csv', previewColumns, previewWithReasons.rows)
   }
 
   function downloadHoldOrders() {
@@ -2342,7 +2747,7 @@ function App() {
       pushToast('No hold orders available to download.', 'warning')
       return
     }
-    triggerDownload('Hold_Orders.csv', HOLD_EXPORT_COLUMNS, analysis.holdOrders)
+    triggerDownload('Hold_Orders.csv', holdExportColumns, analysis.holdOrders)
   }
 
   function downloadSkipOrders() {
@@ -2350,9 +2755,15 @@ function App() {
       pushToast('No skip orders available to download.', 'warning')
       return
     }
-    triggerDownload('Skip_Orders.csv', SKIP_EXPORT_COLUMNS, analysis.skipOrders)
+    triggerDownload('Skip_Orders.csv', skipExportColumns, analysis.skipOrders)
   }
 
+  const showWorkContent = lineType !== 'MDT'
+  const holdExportColumns = showWorkContent ? HOLD_EXPORT_COLUMNS : HOLD_EXPORT_COLUMNS.filter((column) => column !== 'work_content')
+  const skipExportColumns = showWorkContent ? SKIP_EXPORT_COLUMNS : SKIP_EXPORT_COLUMNS.filter((column) => column !== 'work_content')
+  const holdTableColumns = showWorkContent ? HOLD_TABLE_COLUMNS : WITHOUT_WORK_CONTENT(HOLD_TABLE_COLUMNS)
+  const skipTableColumns = showWorkContent ? SKIP_TABLE_COLUMNS : WITHOUT_WORK_CONTENT(SKIP_TABLE_COLUMNS)
+  const previewColumns = showWorkContent ? previewWithReasons.columns : previewWithReasons.columns.filter((column) => column !== 'Work Content')
   const holdModelData = buildPieData(analysis?.summary?.hold_stratification, PIE_HOLD_COLORS)
   const skipModelData = buildPieData(analysis?.summary?.skip_stratification, PIE_SKIP_COLORS)
   const holdTypeData = [analysis?.summary?.hold_type_stratification?.Bus || 0, analysis?.summary?.hold_type_stratification?.Truck || 0]
@@ -2378,6 +2789,10 @@ function App() {
 
       <header className="hero-bar">
         <div className="hero-title-wrap">
+          <button className="settings-tab" type="button" onClick={() => setShowSettings(true)} title="Open settings">
+            <i className="bi bi-gear" />
+            <span>Settings</span>
+          </button>
           <div className="hero-title-block">
             <h1>Production Planning and Control</h1>
             <p>{LINE_TYPES[lineType].title} Sequence Analyser</p>
@@ -2385,6 +2800,17 @@ function App() {
         </div>
       </header>
 
+      {showSettings ? (
+        <SettingsView
+          lineType={lineType}
+          settings={scheduleSettings}
+          onBack={() => setShowSettings(false)}
+          onReset={resetScheduleSettings}
+          onNumberOfShiftsChange={updateNumberOfShifts}
+          onShiftChange={updateScheduleShift}
+          onBreakChange={updateScheduleBreak}
+        />
+      ) : (
       <main className="container-fluid px-3 px-xl-4 pb-5">
         <section className="line-type-panel" aria-label="Vehicle line selector">
           <div>
@@ -2480,7 +2906,7 @@ function App() {
                     {sequencedPreview.statusLabel}
                   </span>
                   <span className="muted-kpi">
-                    Takt time: <strong>{sequencedPreview.taktTime ? `${sequencedPreview.taktTime} min` : 'Pending'}</strong>
+                    Takt time: <strong>{sequencedPreview.taktTime ? `${Math.round(Number(sequencedPreview.taktTime))} min` : 'Pending'}</strong>
                   </span>
                 </div>
               </div>
@@ -2723,6 +3149,39 @@ function App() {
                       onChange={(event) => updateAxleStatusFile(event.target.files?.[0] ?? null)}
                     />
                   </div>
+                  {lineType === 'HDT' ? (
+                    <div>
+                      <label
+                        htmlFor={`${fileInputId}-frame-status`}
+                        className={`report-upload-card engine-status-upload ${dragActiveReport === 'frame-status' ? 'drag-active' : ''}`}
+                        onDragOver={(event) => {
+                          event.preventDefault()
+                          setDragActiveReport('frame-status')
+                        }}
+                        onDragLeave={() => setDragActiveReport(null)}
+                        onDrop={(event) => {
+                          event.preventDefault()
+                          setDragActiveReport(null)
+                          const file = event.dataTransfer.files?.[0]
+                          if (file) {
+                            updateFrameStatusFile(file)
+                          }
+                        }}
+                      >
+                        <i className="bi bi-truck-front upload-icon" />
+                        <span className="upload-title">Frame Status</span>
+                        <span className="upload-copy">Column C DSN to AD status.</span>
+                        <strong className="upload-file">{frameStatusFile?.name || 'No frame status report selected'}</strong>
+                      </label>
+                      <input
+                        id={`${fileInputId}-frame-status`}
+                        type="file"
+                        accept=".xlsx,.xlsm"
+                        className="d-none"
+                        onChange={(event) => updateFrameStatusFile(event.target.files?.[0] ?? null)}
+                      />
+                    </div>
+                  ) : null}
                 </div>
 
                 <div className="action-row">
@@ -2772,89 +3231,102 @@ function App() {
             </section>
 
             {activeReport === 'plan' ? (
-              <PlanSummaryView summary={planSummary} columns={openingSequencedPreview.columns} />
+              <PlanSummaryView
+                summary={planSummary}
+                columns={lineType === 'MDT' ? openingSequencedPreview.columns.filter((column) => column !== 'Work Content') : openingSequencedPreview.columns}
+              />
             ) : (
               <>
             <section className="row g-3 mb-4 mt-1">
               <StatCard label="PBS HOLD" value={analysis.summary.total_hold || 0} tone="hold" icon="bi-pause-circle" />
               <StatCard
-                label="Total Skip Orders"
+                label="SKIP VEHICLES"
                 value={analysis.summary.total_skipped || 0}
                 tone="skip"
                 icon="bi-fast-forward-circle"
               />
             </section>
 
-            <section className="row g-4 mb-4">
-              <PieChartCard
-                title="Stratification: Hold Orders (By Model)"
-                icon="bi-pie-chart-fill text-danger"
-                data={holdModelData}
-                emptyMessage="No hold orders to stratify."
-              />
-              <PieChartCard
-                title="Stratification: Skip Orders (By Model)"
-                icon="bi-pie-chart-fill text-warning"
-                data={skipModelData}
-                emptyMessage="No skip orders to stratify."
-              />
-            </section>
+            <section className="chart-groups mb-4">
+              <div className="chart-group">
+                <PieChartCard
+                  title="Stratification: Hold Orders (By Model)"
+                  icon="bi-pie-chart-fill text-danger"
+                  data={holdModelData}
+                  emptyMessage="No hold orders to stratify."
+                />
+                <div className="mini-chart-grid">
+                  <BarChartCard
+                    title="Hold: Type"
+                    icon="bi-bar-chart-line-fill text-primary"
+                    labels={['Bus', 'Truck']}
+                    values={holdTypeData}
+                    colors={['#5f50cf', '#2ec4b6']}
+                    orders={analysis.holdOrders}
+                    categoryKey="vehicle_type"
+                  />
+                  {showWorkContent ? (
+                    <BarChartCard
+                      title="Hold: W/C"
+                      icon="bi-bar-chart-steps text-primary"
+                      labels={['HWC', 'LWC']}
+                      values={holdWcData}
+                      colors={['#ef476f', '#2a9d8f']}
+                      orders={analysis.holdOrders}
+                      categoryKey="work_content"
+                    />
+                  ) : null}
+                  <BarChartCard
+                    title="Hold: Reg."
+                    icon="bi-globe-americas text-primary"
+                    labels={['Domestic', 'Export']}
+                    values={holdRegionData}
+                    colors={['#3c91e6', '#ffc145']}
+                    orders={analysis.holdOrders}
+                    categoryKey="region"
+                  />
+                </div>
+              </div>
 
-            <section className="row g-3 mb-4">
-              <BarChartCard
-                title="Hold: Type"
-                icon="bi-bar-chart-line-fill text-primary"
-                labels={['Bus', 'Truck']}
-                values={holdTypeData}
-                colors={['#5f50cf', '#2ec4b6']}
-                orders={analysis.holdOrders}
-                categoryKey="vehicle_type"
-              />
-              <BarChartCard
-                title="Hold: W/C"
-                icon="bi-bar-chart-steps text-primary"
-                labels={['HWC', 'LWC']}
-                values={holdWcData}
-                colors={['#ef476f', '#2a9d8f']}
-                orders={analysis.holdOrders}
-                categoryKey="work_content"
-              />
-              <BarChartCard
-                title="Hold: Reg."
-                icon="bi-globe-americas text-primary"
-                labels={['Domestic', 'Export']}
-                values={holdRegionData}
-                colors={['#3c91e6', '#ffc145']}
-                orders={analysis.holdOrders}
-                categoryKey="region"
-              />
-              <BarChartCard
-                title="Skip: Type"
-                icon="bi-bar-chart-line-fill text-primary"
-                labels={['Bus', 'Truck']}
-                values={skipTypeData}
-                colors={['#5f50cf', '#2ec4b6']}
-                orders={analysis.skipOrders}
-                categoryKey="vehicle_type"
-              />
-              <BarChartCard
-                title="Skip: W/C"
-                icon="bi-bar-chart-steps text-primary"
-                labels={['HWC', 'LWC']}
-                values={skipWcData}
-                colors={['#ef476f', '#2a9d8f']}
-                orders={analysis.skipOrders}
-                categoryKey="work_content"
-              />
-              <BarChartCard
-                title="Skip: Reg."
-                icon="bi-globe-americas text-primary"
-                labels={['Domestic', 'Export']}
-                values={skipRegionData}
-                colors={['#3c91e6', '#ffc145']}
-                orders={analysis.skipOrders}
-                categoryKey="region"
-              />
+              <div className="chart-group">
+                <PieChartCard
+                  title="Stratification: Skip Orders (By Model)"
+                  icon="bi-pie-chart-fill text-warning"
+                  data={skipModelData}
+                  emptyMessage="No skip orders to stratify."
+                />
+                <div className="mini-chart-grid">
+                  <BarChartCard
+                    title="Skip: Type"
+                    icon="bi-bar-chart-line-fill text-primary"
+                    labels={['Bus', 'Truck']}
+                    values={skipTypeData}
+                    colors={['#5f50cf', '#2ec4b6']}
+                    orders={analysis.skipOrders}
+                    categoryKey="vehicle_type"
+                  />
+                  {showWorkContent ? (
+                    <BarChartCard
+                      title="Skip: W/C"
+                      icon="bi-bar-chart-steps text-primary"
+                      labels={['HWC', 'LWC']}
+                      values={skipWcData}
+                      colors={['#ef476f', '#2a9d8f']}
+                      orders={analysis.skipOrders}
+                      categoryKey="work_content"
+                    />
+                  ) : null}
+                  <BarChartCard
+                    title="Skip: Reg."
+                    icon="bi-globe-americas text-primary"
+                    labels={['Domestic', 'Export']}
+                    values={skipRegionData}
+                    colors={['#3c91e6', '#ffc145']}
+                    orders={analysis.skipOrders}
+                    categoryKey="region"
+                  />
+                </div>
+              </div>
             </section>
 
             <section className="panel-card mb-4">
@@ -2913,10 +3385,9 @@ function App() {
               badgeClassName="bg-warning text-dark"
               badgeValue={analysis.skipOrders.length}
               emptyMessage="No skip orders found."
-              columns={SKIP_TABLE_COLUMNS}
+              columns={skipTableColumns}
               rows={analysis.skipOrders}
               onDownload={downloadSkipOrders}
-              fileNameHint="TRIM LINE vehicles trapped in out-of-sequence blocks"
               reasonBucket={reasonConfig.skip}
               onGroupByChange={(groupBy) => updateReasonGroupBy('skip', groupBy)}
               onGroupSelect={(group) => updateReasonGroup('skip', group)}
@@ -2932,7 +3403,7 @@ function App() {
               badgeClassName="bg-danger"
               badgeValue={analysis.holdOrders.length}
               emptyMessage="No hold orders found."
-              columns={HOLD_TABLE_COLUMNS}
+              columns={holdTableColumns}
               rows={analysis.holdOrders}
               onDownload={downloadHoldOrders}
               reasonBucket={reasonConfig.hold}
@@ -2965,7 +3436,7 @@ function App() {
                   <table className="table table-bordered table-hover mb-0 data-table preview-table">
                     <thead>
                       <tr>
-                        {previewWithReasons.columns.map((column) => (
+                        {previewColumns.map((column) => (
                           <th
                             key={column}
                             className={SEQUENCE_COLUMNS.includes(column) ? 'sequence-head' : ''}
@@ -2980,7 +3451,7 @@ function App() {
                         const shortageCount = getShortageCount(row)
                         return (
                           <tr key={`preview-${rowIndex}-${row['Serial Number'] || row.Serial || rowIndex}`} className={getPreviewRowClass(shortageCount)}>
-                            {previewWithReasons.columns.map((column) => {
+                            {previewColumns.map((column) => {
                               const value = row[column] ?? ''
                               const className = getTableCellClass(column, value, shortageCount)
                               return (
@@ -2996,6 +3467,30 @@ function App() {
                   </table>
                 </div>
               </div>
+              <div className="data-preview-actions">
+                <div>
+                  <strong>Day opening backup</strong>
+                  <span>Save the mapped opening report, uploaded constraint files, and PDF summary.</span>
+                </div>
+                <button
+                  className="btn btn-primary btn-sm fw-semibold"
+                  type="button"
+                  onClick={saveConstraintsBackup}
+                  disabled={savingConstraints || !analyses.opening}
+                >
+                  {savingConstraints ? (
+                    <>
+                      <span className="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true" />
+                      Saving
+                    </>
+                  ) : (
+                    <>
+                      <i className="bi bi-save me-1" />
+                      Save Constraints
+                    </>
+                  )}
+                </button>
+              </div>
             </section>
 
             <section className="panel-card mb-4">
@@ -3010,7 +3505,7 @@ function App() {
                 </small>
               </div>
               <div className="panel-card-body">
-                {lineType === 'HDT' ? (
+                {currentDayStatusSummary.shifts.length > 1 ? (
                   <div className="status-shift-groups">
                     {currentDayStatusSummary.shifts.map((shift) => (
                       <div className="status-shift-group" key={shift.label}>
@@ -3018,44 +3513,12 @@ function App() {
                           <strong>{shift.label}</strong>
                           <span>{shift.rowCount} Vehicles in sequence</span>
                         </div>
-                        <div className="status-summary-grid">
-                          <StatusSummaryTable
-                            title="Engine status"
-                            column="Engine status"
-                            rows={shift.engine}
-                          />
-                          <StatusSummaryTable
-                            title="Transmission status"
-                            column="Transmission status"
-                            rows={shift.transmission}
-                          />
-                          <StatusSummaryTable
-                            title="Axle status"
-                            column="Axle status"
-                            rows={shift.axle}
-                          />
-                        </div>
+                        <StatusSummaryGroup summary={shift} includeFrame={lineType === 'HDT'} />
                       </div>
                     ))}
                   </div>
                 ) : (
-                  <div className="status-summary-grid">
-                    <StatusSummaryTable
-                      title="Engine status"
-                      column="Engine status"
-                      rows={currentDayStatusSummary.engine}
-                    />
-                    <StatusSummaryTable
-                      title="Transmission status"
-                      column="Transmission status"
-                      rows={currentDayStatusSummary.transmission}
-                    />
-                    <StatusSummaryTable
-                      title="Axle status"
-                      column="Axle status"
-                      rows={currentDayStatusSummary.axle}
-                    />
-                  </div>
+                  <StatusSummaryGroup summary={currentDayStatusSummary} includeFrame={lineType === 'HDT'} />
                 )}
               </div>
             </section>
@@ -3142,6 +3605,7 @@ function App() {
           </div>
         ) : null}
       </main>
+      )}
     </div>
   )
 }
