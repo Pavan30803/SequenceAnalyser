@@ -5,3 +5,12 @@ Press CTRL+C to quit
  * Debugger is active!
  * Debugger PIN: 517-154-418
 127.0.0.1 - - [26/Apr/2026 19:04:40] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [26/Apr/2026 19:07:55] "POST /api/analyze HTTP/1.1" 200 -
+ * Detected change in 'D:\\Sequence Analyzer\\SequenceAnalyser\\app.py', reloading
+ * Restarting with stat
+ * Debugger is active!
+ * Debugger PIN: 517-154-418
+ * Detected change in 'D:\\Sequence Analyzer\\SequenceAnalyser\\.venv\\Lib\\site-packages\\pandas\\core\\ops\\array_ops.py', reloading
+ * Restarting with stat
+ * Debugger is active!
+ * Debugger PIN: 517-154-418
