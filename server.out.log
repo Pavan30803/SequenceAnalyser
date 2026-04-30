@@ -1,8 +1,7 @@
  * Serving Flask app 'app'
  * Debug mode: on
-Error parsing frame status file: tuple index out of range
-Error parsing frame status file: tuple index out of range
-Error parsing frame status file: tuple index out of range
-Error parsing frame status file: tuple index out of range
-Error parsing frame status file: tuple index out of range
-Error parsing frame status file: tuple index out of range
+Critical part lookup failed: 'utf-8' codec can't decode byte 0xa0 in position 84424: invalid start byte
+Critical part lookup failed: 'utf-8' codec can't decode byte 0xa0 in position 84424: invalid start byte
+Critical part lookup failed: 'utf-8' codec can't decode byte 0xa0 in position 84424: invalid start byte
+Critical part lookup failed: File is not a zip file
+Critical part lookup failed: File is not a zip file

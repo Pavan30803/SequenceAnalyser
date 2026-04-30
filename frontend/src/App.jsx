@@ -153,9 +153,15 @@ const PLAN_REPORT_TYPE = {
   shortTitle: 'Plan',
   copy: 'Current-day plan message generated from the Opening report.',
 }
+const CRITICAL_PART_REPORT_TYPE = {
+  title: 'Critical Part info',
+  shortTitle: 'Critical Part info',
+  copy: 'Maintain critical part ownership, stock, and outlook details.',
+}
 const ANALYTICS_VIEW_TYPES = {
   ...REPORT_TYPES,
   plan: PLAN_REPORT_TYPE,
+  critical: CRITICAL_PART_REPORT_TYPE,
 }
 const VAJRA_VARIANTS = new Set([
   'V400842221O000103',
@@ -353,6 +359,29 @@ function createReasonState() {
     skip: createReasonBucket(),
     hold: createReasonBucket(),
   }
+}
+
+function createCriticalPartRow(patch = {}) {
+  return {
+    id: `critical-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    partNumber: '',
+    partDescription: '',
+    vendorName: '',
+    pmcName: '',
+    l4Name: '',
+    pointOfFit: '',
+    platform: '',
+    referenceOrderNumber: '',
+    availableStock: '',
+    expectedQty: '',
+    expectedEta: '',
+    requirementCoverage: [],
+    ...patch,
+  }
+}
+
+function normalizeCriticalPartNumber(value) {
+  return String(value ?? '').replaceAll('.', '').trim()
 }
 
 function getPartNumberFromFileName(fileName = '') {
@@ -1322,10 +1351,13 @@ function getStatusCellClass(column, value) {
   }
 
   if (column === 'Frame status') {
-    if (status === 'COVERED') {
+    if (status === 'COVERED' || status === 'FG') {
       return 'cell-status-green'
     }
-    if (status === 'YET TO START' || status === 'TO BE PROD' || status === 'WIP') {
+    if (status === 'WIP') {
+      return 'cell-status-yellow'
+    }
+    if (status === 'TO BE PROD' || status === 'YET TO START') {
       return 'cell-status-orange'
     }
     if (status === 'PART SHORTAGE') {
@@ -1497,7 +1529,7 @@ function StatusSummaryTable({ title, column, rows }) {
   )
 }
 
-function StatusSummaryGroup({ summary, includeFrame = false }) {
+function StatusSummaryGroup({ summary }) {
   return (
     <div className="status-summary-paired">
       <div className="status-summary-grid">
@@ -1518,13 +1550,11 @@ function StatusSummaryGroup({ summary, includeFrame = false }) {
           column="Axle status"
           rows={summary.axle}
         />
-        {includeFrame ? (
-          <StatusSummaryTable
-            title="Frame coverage"
-            column="Frame status"
-            rows={summary.frame}
-          />
-        ) : null}
+        <StatusSummaryTable
+          title="Frame coverage"
+          column="Frame status"
+          rows={summary.frame}
+        />
       </div>
     </div>
   )
@@ -1814,6 +1844,159 @@ function ResultsTable({
   )
 }
 
+function CriticalPartInfoView({
+  parts,
+  draft,
+  lookupLoading,
+  sevenDaysReportFile,
+  onDraftChange,
+  onDraftPartBlur,
+  onAddPart,
+  onPartChange,
+  onRemovePart,
+}) {
+  const plannerFields = [
+    ['Part Number', 'partNumber'],
+    ['Point of Fit', 'pointOfFit'],
+    ['Platform', 'platform'],
+    ['Reference order number', 'referenceOrderNumber'],
+    ['Available stock', 'availableStock'],
+    ['Expected qty', 'expectedQty'],
+    ['Expected ETA', 'expectedEta'],
+  ]
+  const autoFields = [
+    ['Part Description', 'partDescription'],
+    ['Vendor name', 'vendorName'],
+    ['PMC name', 'pmcName'],
+    ['L4 name', 'l4Name'],
+  ]
+  const getCoverageStatusClass = (status) => {
+    const normalizedStatus = normalizeLookupKey(status)
+    if (normalizedStatus === 'SHORTAGE') return 'coverage-status-shortage'
+    if (normalizedStatus === 'AVAILABLE') return 'coverage-status-available'
+    if (normalizedStatus === 'NOT IN DEMAND') return 'coverage-status-not-demand'
+    return 'coverage-status-neutral'
+  }
+  const renderCoverage = (coverage = []) => {
+    const safeCoverage = Array.isArray(coverage) && coverage.length ? coverage : [
+      { day: 'N', dayStatus: '', shifts: [{ label: 'A Shift', qty: '', status: '' }, { label: 'B Shift', qty: '', status: '' }] },
+      { day: 'N+1', dayStatus: '', shifts: [{ label: 'A Shift', qty: '', status: '' }, { label: 'B Shift', qty: '', status: '' }] },
+      { day: 'N+2', dayStatus: '', shifts: [{ label: 'A Shift', qty: '', status: '' }, { label: 'B Shift', qty: '', status: '' }] },
+    ]
+
+    return (
+      <div className="coverage-panel">
+        <h6>N, N+1, N+2 Coverage</h6>
+        <div className="coverage-day-grid">
+          {safeCoverage.map((day) => (
+            <div className="coverage-day-card" key={day.day}>
+              <div className="coverage-day-header">
+                <strong>{day.day}</strong>
+                <span className={`coverage-status-dot ${getCoverageStatusClass(day.dayStatus)}`} title={day.dayStatus || 'No status'} />
+              </div>
+              <div className="coverage-shifts">
+                {(day.shifts ?? []).map((shift) => (
+                  <div className="coverage-shift-row" key={`${day.day}-${shift.label}`}>
+                    <span>{shift.label}</span>
+                    <strong>{shift.qty !== '' && shift.qty !== null && shift.qty !== undefined ? shift.qty : '-'}</strong>
+                    <span className={`coverage-status-text ${getCoverageStatusClass(shift.status)}`}>{shift.status || 'No status'}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  }
+  const renderField = (record, field, label, onChange, onBlur) => (
+    <label className="critical-part-field" key={`${record.id ?? 'draft'}-${field}`}>
+      <span>{label}</span>
+      {field === 'platform' ? (
+        <select
+          className="form-select form-select-sm"
+          value={record.platform}
+          onChange={(event) => onChange({ platform: event.target.value })}
+        >
+          <option value="">Select platform</option>
+          <option value="HDT">HDT</option>
+          <option value="MDT">MDT</option>
+        </select>
+      ) : (
+        <input
+          type={field === 'expectedEta' ? 'datetime-local' : field === 'availableStock' || field === 'expectedQty' ? 'number' : 'text'}
+          className="form-control form-control-sm"
+          min={field === 'availableStock' || field === 'expectedQty' ? '0' : undefined}
+          value={record[field]}
+          onBlur={field === 'partNumber' ? onBlur : undefined}
+          onChange={(event) => onChange({ [field]: event.target.value })}
+        />
+      )}
+    </label>
+  )
+  const renderGroupedFields = (record, onChange, onPartNumberBlur) => (
+    <div className="critical-part-field-groups">
+      <div className="critical-part-field-group">
+        <h6>Planner inputs</h6>
+        <div className="critical-part-grid">
+          {plannerFields.map(([label, field]) => renderField(record, field, label, onChange, onPartNumberBlur))}
+        </div>
+      </div>
+      <div className="critical-part-field-group critical-part-auto-group">
+        <h6>Auto populated from 7 days report</h6>
+        <div className="critical-part-grid">
+          {autoFields.map(([label, field]) => renderField(record, field, label, onChange))}
+        </div>
+        {renderCoverage(record.requirementCoverage)}
+      </div>
+    </div>
+  )
+
+  return (
+    <section className="panel-card mb-4 critical-part-panel">
+      <div className="panel-card-header">
+        <span>
+          <i className="bi bi-exclamation-diamond text-danger" /> Critical Part info
+        </span>
+        <small className="text-secondary">
+          {sevenDaysReportFile ? sevenDaysReportFile.name : 'Upload the 7 days report in Step 3 for part lookup.'}
+        </small>
+      </div>
+      <div className="panel-card-body">
+        {parts.length > 0 ? (
+          <div className="critical-part-list">
+            {parts.map((part, index) => (
+              <div className="critical-part-item" key={part.id}>
+                <div className="critical-part-item-header">
+                  <strong>Part {index + 1}</strong>
+                  <button type="button" className="btn btn-sm btn-outline-danger" onClick={() => onRemovePart(part.id)}>
+                    <i className="bi bi-trash" />
+                  </button>
+                </div>
+                {renderGroupedFields(part, (patch) => onPartChange(part.id, patch))}
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="empty-table mb-3">No critical part details added yet.</div>
+        )}
+
+        <div className="critical-part-add">
+          <div className="critical-part-add-header">
+            <strong>Add part details</strong>
+            {lookupLoading ? <span className="text-secondary small">Looking up part details...</span> : null}
+          </div>
+          {renderGroupedFields(draft, onDraftChange, onDraftPartBlur)}
+          <button type="button" className="btn btn-primary btn-sm fw-semibold" onClick={onAddPart} disabled={lookupLoading}>
+            <i className="bi bi-plus-lg me-1" />
+            Add part details
+          </button>
+        </div>
+      </div>
+    </section>
+  )
+}
+
 function OrderCell({ field, value, holdTable }) {
   const safeValue = value || '—'
 
@@ -2079,15 +2262,7 @@ function PlanSummaryView({ summary, columns }) {
   )
 }
 
-function SettingsView({
-  lineType,
-  settings,
-  onBack,
-  onReset,
-  onNumberOfShiftsChange,
-  onShiftChange,
-  onBreakChange,
-}) {
+function SettingsView({ lineType, settings, onBack, onReset, onNumberOfShiftsChange, onShiftChange, onBreakChange }) {
   const activeShiftCount = Math.min(Math.max(Number.parseInt(settings.numberOfShifts, 10) || 1, 1), 3)
 
   return (
@@ -2195,7 +2370,6 @@ function SettingsView({
             </div>
           </section>
         </div>
-
       </section>
     </main>
   )
@@ -2209,6 +2383,7 @@ function App() {
   const [reportFiles, setReportFiles] = useState({ opening: null, mod: null })
   const [reportUploadedAt, setReportUploadedAt] = useState({ opening: null, mod: null })
   const [modStartSequence, setModStartSequence] = useState('')
+  const [sevenDaysReportFile, setSevenDaysReportFile] = useState(null)
   const [engineStatusFile, setEngineStatusFile] = useState(null)
   const [axleStatusFile, setAxleStatusFile] = useState(null)
   const [frameStatusFile, setFrameStatusFile] = useState(null)
@@ -2224,6 +2399,9 @@ function App() {
   const [analyses, setAnalyses] = useState({ opening: null, mod: null })
   const [activeReport, setActiveReport] = useState('opening')
   const [reasonConfig, setReasonConfig] = useState(createReasonState)
+  const [criticalParts, setCriticalParts] = useState([])
+  const [criticalPartDraft, setCriticalPartDraft] = useState(() => createCriticalPartRow())
+  const [criticalLookupLoading, setCriticalLookupLoading] = useState(false)
   const [showLanding, setShowLanding] = useState(getInitialLandingState)
   const [loading, setLoading] = useState(false)
   const [savingConstraints, setSavingConstraints] = useState(false)
@@ -2244,8 +2422,8 @@ function App() {
   const analysis = analyses[activeReport] ?? analyses.opening ?? analyses.mod
   const availableReports = Object.keys(REPORT_TYPES).filter((reportKey) => analyses[reportKey])
   const availableReportViews = analyses.opening
-    ? [...availableReports, 'plan']
-    : availableReports
+    ? [...availableReports, 'plan', 'critical']
+    : [...availableReports, 'critical']
   const activeViewType = ANALYTICS_VIEW_TYPES[activeReport] ?? REPORT_TYPES.opening
   const modUploadedAt =
     reportUploadedAt.mod ??
@@ -2310,6 +2488,7 @@ function App() {
           setReportFiles(workspace.reportFiles ?? { opening: null, mod: null })
           setReportUploadedAt(workspace.reportUploadedAt ?? { opening: null, mod: null })
           setModStartSequence(workspace.modStartSequence ?? '')
+          setSevenDaysReportFile(workspace.sevenDaysReportFile ?? null)
           setEngineStatusFile(workspace.engineStatusFile ?? null)
           setAxleStatusFile(workspace.axleStatusFile ?? null)
           setFrameStatusFile(workspace.frameStatusFile ?? null)
@@ -2323,6 +2502,8 @@ function App() {
           setAnalyses(workspace.analyses ?? { opening: null, mod: null })
           setActiveReport(workspace.activeReport ?? 'opening')
           setReasonConfig(workspace.reasonConfig ?? createReasonState())
+          setCriticalParts(Array.isArray(workspace.criticalParts) ? workspace.criticalParts : [])
+          setCriticalPartDraft(workspace.criticalPartDraft ?? createCriticalPartRow())
         }
       })
       .catch(() => {
@@ -2350,6 +2531,7 @@ function App() {
         reportFiles,
         reportUploadedAt,
         modStartSequence,
+        sevenDaysReportFile,
         engineStatusFile,
         axleStatusFile,
         frameStatusFile,
@@ -2362,6 +2544,8 @@ function App() {
         analyses,
         activeReport,
         reasonConfig,
+        criticalParts,
+        criticalPartDraft,
         savedAt: new Date().toISOString(),
       }).catch(() => {
         pushToast('Workspace could not be saved in this browser.', 'warning')
@@ -2371,7 +2555,7 @@ function App() {
     return () => {
       window.clearTimeout(workspaceSaveTimerRef.current)
     }
-  }, [lineType, reportFiles, reportUploadedAt, modStartSequence, engineStatusFile, axleStatusFile, frameStatusFile, capacity, startDate, scheduleSettings, holidayInput, holidays, shortages, analyses, activeReport, reasonConfig])
+  }, [lineType, reportFiles, reportUploadedAt, modStartSequence, sevenDaysReportFile, engineStatusFile, axleStatusFile, frameStatusFile, capacity, startDate, scheduleSettings, holidayInput, holidays, shortages, analyses, activeReport, reasonConfig, criticalParts, criticalPartDraft])
 
   function pushToast(message, type = 'danger') {
     toastCounterRef.current += 1
@@ -2434,6 +2618,10 @@ function App() {
     if (activeReport === 'plan') {
       setActiveReport('opening')
     }
+  }
+
+  function updateSevenDaysReportFile(file) {
+    setSevenDaysReportFile(file)
   }
 
   function updateEngineStatusFile(file) {
@@ -2508,6 +2696,7 @@ function App() {
     setReportFiles({ opening: null, mod: null })
     setReportUploadedAt({ opening: null, mod: null })
     setModStartSequence('')
+    setSevenDaysReportFile(null)
     setEngineStatusFile(null)
     setAxleStatusFile(null)
     setFrameStatusFile(null)
@@ -2522,6 +2711,9 @@ function App() {
     setAnalyses({ opening: null, mod: null })
     setActiveReport('opening')
     setReasonConfig(createReasonState())
+    setCriticalParts([])
+    setCriticalPartDraft(createCriticalPartRow())
+    setCriticalLookupLoading(false)
     setToasts([])
   }
 
@@ -2603,6 +2795,146 @@ function App() {
     }))
   }
 
+  function updateCriticalPartDraft(patch) {
+    setCriticalPartDraft((current) => ({ ...current, ...patch }))
+  }
+
+  function updateCriticalPart(id, patch) {
+    setCriticalParts((current) => current.map((part) => (part.id === id ? { ...part, ...patch } : part)))
+  }
+
+  function removeCriticalPart(id) {
+    setCriticalParts((current) => current.filter((part) => part.id !== id))
+  }
+
+  async function lookupCriticalPartDetails(partNumber, { silent = false } = {}) {
+    const normalizedPartNumber = normalizeCriticalPartNumber(partNumber)
+    if (!normalizedPartNumber) {
+      return null
+    }
+    if (!sevenDaysReportFile) {
+      if (!silent) {
+        pushToast('Upload the 7 days report before looking up critical part details.', 'warning')
+      }
+      return null
+    }
+
+    const formData = new FormData()
+    formData.append('part_number', normalizedPartNumber)
+    formData.append('seven_days_report_file', sevenDaysReportFile)
+
+    setCriticalLookupLoading(true)
+    try {
+      const response = await fetch('/api/critical-part-details', { method: 'POST', body: formData })
+      const result = await response.json()
+      if (!response.ok || result.error) {
+        throw new Error(result.error || 'Part details could not be found.')
+      }
+      return result
+    } catch (error) {
+      if (!silent) {
+        pushToast(`Part lookup failed: ${error.message}`, 'warning')
+      }
+      return null
+    } finally {
+      setCriticalLookupLoading(false)
+    }
+  }
+
+  async function fillCriticalPartDraftFromReport() {
+    const normalizedPartNumber = normalizeCriticalPartNumber(criticalPartDraft.partNumber)
+    if (normalizedPartNumber !== criticalPartDraft.partNumber) {
+      setCriticalPartDraft((current) => ({ ...current, partNumber: normalizedPartNumber }))
+    }
+    const details = await lookupCriticalPartDetails(normalizedPartNumber)
+    if (details) {
+      setCriticalPartDraft((current) => ({ ...current, ...details }))
+    }
+  }
+
+  async function addCriticalPart() {
+    const normalizedPartNumber = normalizeCriticalPartNumber(criticalPartDraft.partNumber)
+    if (!normalizedPartNumber) {
+      pushToast('Enter a part number before adding critical part details.', 'warning')
+      return
+    }
+
+    const details = await lookupCriticalPartDetails(normalizedPartNumber, {
+      silent: Boolean(criticalPartDraft.partDescription || criticalPartDraft.vendorName || criticalPartDraft.pmcName || criticalPartDraft.l4Name),
+    })
+    const nextPart = {
+      ...criticalPartDraft,
+      ...(details ?? {}),
+      partNumber: details?.partNumber || normalizedPartNumber,
+      id: createCriticalPartRow().id,
+    }
+    setCriticalParts((current) => [...current, nextPart])
+    setCriticalPartDraft(createCriticalPartRow())
+  }
+
+  async function saveConstraintsBackup() {
+    if (!analyses.opening || !openingSequencedPreview.rows.length) {
+      pushToast('Analyze the opening report before saving constraints.', 'warning')
+      return
+    }
+
+    const mappedColumns = lineType === 'MDT'
+      ? openingPreviewWithReasons.columns.filter((column) => column !== 'Work Content')
+      : openingPreviewWithReasons.columns
+    const mappedCsv = buildCsvText(mappedColumns, openingPreviewWithReasons.rows)
+    const formData = new FormData()
+    formData.append('line_type', lineType)
+    formData.append('mapped_columns', JSON.stringify(mappedColumns))
+    formData.append('mapped_report_file', new Blob([mappedCsv], { type: 'text/csv;charset=utf-8;' }), 'Mapped_Day_Opening_Report.csv')
+    formData.append('summary', JSON.stringify(analyses.opening.summary ?? {}))
+    formData.append('status_summary', JSON.stringify(openingStatusSummary))
+    formData.append('inference_cards', JSON.stringify(openingInferenceCards))
+
+    if (reportFiles.opening) {
+      formData.append('opening_report_file', reportFiles.opening)
+    }
+    if (reportFiles.mod) {
+      formData.append('mod_report_file', reportFiles.mod)
+    }
+    if (sevenDaysReportFile) {
+      formData.append('seven_days_report_file', sevenDaysReportFile)
+    }
+    if (engineStatusFile) {
+      formData.append('engine_status_file', engineStatusFile)
+    }
+    if (axleStatusFile) {
+      formData.append('axle_status_file', axleStatusFile)
+    }
+    if (lineType === 'HDT' && frameStatusFile) {
+      formData.append('frame_status_file', frameStatusFile)
+    }
+    for (const shortage of shortages) {
+      if (shortage.file) {
+        formData.append('shortage_files', shortage.file)
+      }
+    }
+
+    setSavingConstraints(true)
+    try {
+      const response = await fetch('/api/save-constraints', { method: 'POST', body: formData })
+      const responseText = await response.text()
+      let result = {}
+      try {
+        result = responseText ? JSON.parse(responseText) : {}
+      } catch {
+        throw new Error(`Server returned a non-JSON response. Restart the backend and try again. Status: ${response.status}`)
+      }
+      if (!response.ok || result.error) {
+        throw new Error(result.error || 'Backup could not be saved.')
+      }
+      pushToast(`Constraints backup saved: ${result.folder}`, 'success')
+    } catch (error) {
+      pushToast(`Save failed: ${error.message}`, 'danger')
+    } finally {
+      setSavingConstraints(false)
+    }
+  }
+
   function buildAnalysisFormData(file, options = {}) {
     const formData = new FormData()
     formData.append('file', file)
@@ -2671,66 +3003,6 @@ function App() {
       pushToast(`Network error: ${error.message}`, 'danger')
     } finally {
       setLoading(false)
-    }
-  }
-
-  async function saveConstraintsBackup() {
-    if (!analyses.opening || !openingSequencedPreview.rows.length) {
-      pushToast('Analyze the opening report before saving constraints.', 'warning')
-      return
-    }
-
-    const mappedColumns = lineType === 'MDT'
-      ? openingPreviewWithReasons.columns.filter((column) => column !== 'Work Content')
-      : openingPreviewWithReasons.columns
-    const formData = new FormData()
-    const mappedCsv = buildCsvText(mappedColumns, openingPreviewWithReasons.rows)
-    formData.append('line_type', lineType)
-    formData.append('mapped_columns', JSON.stringify(mappedColumns))
-    formData.append('mapped_report_file', new Blob([mappedCsv], { type: 'text/csv;charset=utf-8;' }), 'Mapped_Day_Opening_Report.csv')
-    formData.append('summary', JSON.stringify(analyses.opening.summary ?? {}))
-    formData.append('status_summary', JSON.stringify(openingStatusSummary))
-    formData.append('inference_cards', JSON.stringify(openingInferenceCards))
-
-    if (reportFiles.opening) {
-      formData.append('opening_report_file', reportFiles.opening)
-    }
-    if (reportFiles.mod) {
-      formData.append('mod_report_file', reportFiles.mod)
-    }
-    if (engineStatusFile) {
-      formData.append('engine_status_file', engineStatusFile)
-    }
-    if (axleStatusFile) {
-      formData.append('axle_status_file', axleStatusFile)
-    }
-    if (lineType === 'HDT' && frameStatusFile) {
-      formData.append('frame_status_file', frameStatusFile)
-    }
-    for (const shortage of shortages) {
-      if (shortage.file) {
-        formData.append('shortage_files', shortage.file)
-      }
-    }
-
-    setSavingConstraints(true)
-    try {
-      const response = await fetch('/api/save-constraints', { method: 'POST', body: formData })
-      const responseText = await response.text()
-      let result = {}
-      try {
-        result = responseText ? JSON.parse(responseText) : {}
-      } catch {
-        throw new Error(`Server returned a non-JSON response. Restart the backend and try again. Status: ${response.status}`)
-      }
-      if (!response.ok || result.error) {
-        throw new Error(result.error || 'Backup could not be saved.')
-      }
-      pushToast(`Constraints backup saved: ${result.folder}`, 'success')
-    } catch (error) {
-      pushToast(`Save failed: ${error.message}`, 'danger')
-    } finally {
-      setSavingConstraints(false)
     }
   }
 
@@ -3053,7 +3325,6 @@ function App() {
                         >
                           <i className="bi bi-file-earmark-spreadsheet upload-icon" />
                           <span className="upload-title">{report.title}</span>
-                          <span className="upload-copy">{report.copy}</span>
                           <strong className="upload-file">{selectedReportFile?.name || 'No file selected'}</strong>
                         </label>
                         <input
@@ -3088,6 +3359,37 @@ function App() {
                 <div className="report-upload-grid auxiliary-report-grid mt-3">
                   <div>
                     <label
+                      htmlFor={`${fileInputId}-seven-days-report`}
+                      className={`report-upload-card engine-status-upload ${dragActiveReport === 'seven-days-report' ? 'drag-active' : ''}`}
+                      onDragOver={(event) => {
+                        event.preventDefault()
+                        setDragActiveReport('seven-days-report')
+                      }}
+                      onDragLeave={() => setDragActiveReport(null)}
+                      onDrop={(event) => {
+                        event.preventDefault()
+                        setDragActiveReport(null)
+                        const file = event.dataTransfer.files?.[0]
+                        if (file) {
+                          updateSevenDaysReportFile(file)
+                        }
+                      }}
+                    >
+                      <i className="bi bi-calendar-week upload-icon" />
+                      <span className="upload-title">7 Days Report</span>
+                      <strong className="upload-file">{sevenDaysReportFile?.name || 'No 7 days report selected'}</strong>
+                    </label>
+                    <input
+                      id={`${fileInputId}-seven-days-report`}
+                      type="file"
+                      accept=".xlsx,.xls,.csv"
+                      className="d-none"
+                      onChange={(event) => updateSevenDaysReportFile(event.target.files?.[0] ?? null)}
+                    />
+                  </div>
+
+                  <div>
+                    <label
                       htmlFor={`${fileInputId}-engine-status`}
                       className={`report-upload-card engine-status-upload ${dragActiveReport === 'engine-status' ? 'drag-active' : ''}`}
                       onDragOver={(event) => {
@@ -3106,7 +3408,6 @@ function App() {
                     >
                       <i className="bi bi-gear-wide-connected upload-icon" />
                       <span className="upload-title">Engine &amp; Transmission</span>
-                      <span className="upload-copy">Column C to J/L status.</span>
                       <strong className="upload-file">{engineStatusFile?.name || 'No status report selected'}</strong>
                     </label>
                     <input
@@ -3138,7 +3439,6 @@ function App() {
                     >
                       <i className="bi bi-circle-square upload-icon" />
                       <span className="upload-title">Axle Status</span>
-                      <span className="upload-copy">Column B to E color status.</span>
                       <strong className="upload-file">{axleStatusFile?.name || 'No axle status report selected'}</strong>
                     </label>
                     <input
@@ -3170,7 +3470,6 @@ function App() {
                       >
                         <i className="bi bi-truck-front upload-icon" />
                         <span className="upload-title">Frame Status</span>
-                        <span className="upload-copy">Column C DSN to AD status.</span>
                         <strong className="upload-file">{frameStatusFile?.name || 'No frame status report selected'}</strong>
                       </label>
                       <input
@@ -3230,7 +3529,19 @@ function App() {
               </div>
             </section>
 
-            {activeReport === 'plan' ? (
+            {activeReport === 'critical' ? (
+              <CriticalPartInfoView
+                parts={criticalParts}
+                draft={criticalPartDraft}
+                lookupLoading={criticalLookupLoading}
+                sevenDaysReportFile={sevenDaysReportFile}
+                onDraftChange={updateCriticalPartDraft}
+                onDraftPartBlur={fillCriticalPartDraftFromReport}
+                onAddPart={addCriticalPart}
+                onPartChange={updateCriticalPart}
+                onRemovePart={removeCriticalPart}
+              />
+            ) : activeReport === 'plan' ? (
               <PlanSummaryView
                 summary={planSummary}
                 columns={lineType === 'MDT' ? openingSequencedPreview.columns.filter((column) => column !== 'Work Content') : openingSequencedPreview.columns}
@@ -3513,12 +3824,12 @@ function App() {
                           <strong>{shift.label}</strong>
                           <span>{shift.rowCount} Vehicles in sequence</span>
                         </div>
-                        <StatusSummaryGroup summary={shift} includeFrame={lineType === 'HDT'} />
+                        <StatusSummaryGroup summary={shift} />
                       </div>
                     ))}
                   </div>
                 ) : (
-                  <StatusSummaryGroup summary={currentDayStatusSummary} includeFrame={lineType === 'HDT'} />
+                  <StatusSummaryGroup summary={currentDayStatusSummary} />
                 )}
               </div>
             </section>

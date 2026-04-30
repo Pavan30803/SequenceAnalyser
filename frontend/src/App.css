@@ -1179,6 +1179,187 @@
   width: min(24rem, calc(100vw - 2rem));
 }
 
+.critical-part-panel .panel-card-body {
+  display: grid;
+  gap: 1rem;
+}
+
+.critical-part-list {
+  display: grid;
+  gap: 1rem;
+}
+
+.critical-part-item,
+.critical-part-add {
+  border: 1px solid #dce5ef;
+  border-radius: 0.7rem;
+  background: #f8fbff;
+  padding: 1rem;
+}
+
+.critical-part-item-header,
+.critical-part-add-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.8rem;
+  margin-bottom: 0.9rem;
+}
+
+.critical-part-item-header strong,
+.critical-part-add-header strong {
+  color: #12345b;
+  font-size: 0.95rem;
+}
+
+.critical-part-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+}
+
+.critical-part-field-groups {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  gap: 1rem;
+}
+
+.critical-part-field-group {
+  display: grid;
+  align-content: start;
+  gap: 0.85rem;
+  border: 1px solid #dce5ef;
+  border-radius: 0.65rem;
+  background: #fff;
+  padding: 0.9rem;
+}
+
+.critical-part-field-group h6 {
+  margin: 0;
+  color: #12345b;
+  font-size: 0.82rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.critical-part-auto-group {
+  background: #fbfdff;
+}
+
+.coverage-panel {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.coverage-panel h6 {
+  margin-top: 0.25rem;
+}
+
+.coverage-day-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.coverage-day-card {
+  display: grid;
+  gap: 0.65rem;
+  border: 1px solid #dce5ef;
+  border-radius: 0.6rem;
+  background: #fff;
+  padding: 0.75rem;
+}
+
+.coverage-day-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.coverage-day-header strong {
+  color: #12345b;
+}
+
+.coverage-status-dot {
+  width: 0.85rem;
+  height: 0.85rem;
+  border-radius: 999px;
+  background: #9aa8bc;
+  box-shadow: 0 0 0.55rem rgba(154, 168, 188, 0.8);
+  flex: 0 0 auto;
+}
+
+.coverage-status-available {
+  background: #7ed321;
+  color: #136c47;
+  box-shadow: 0 0 0.65rem rgba(126, 211, 33, 0.85);
+}
+
+.coverage-status-shortage {
+  background: #d0021b;
+  color: #a20d20;
+  box-shadow: 0 0 0.65rem rgba(208, 2, 27, 0.78);
+}
+
+.coverage-status-not-demand {
+  background: #3c91e6;
+  color: #1b64a5;
+  box-shadow: 0 0 0.65rem rgba(60, 145, 230, 0.82);
+}
+
+.coverage-status-neutral {
+  background: #9aa8bc;
+  color: #617082;
+}
+
+.coverage-shifts {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.coverage-shift-row {
+  display: grid;
+  grid-template-columns: minmax(4.2rem, 1fr) auto;
+  gap: 0.2rem 0.6rem;
+  align-items: center;
+  color: #617082;
+  font-size: 0.82rem;
+}
+
+.coverage-shift-row strong {
+  color: #12345b;
+  text-align: right;
+}
+
+.coverage-status-text {
+  grid-column: 1 / -1;
+  justify-self: start;
+  border-radius: 999px;
+  background: #eef3f8;
+  padding: 0.12rem 0.45rem;
+  box-shadow: none;
+  font-size: 0.68rem;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.critical-part-field {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.critical-part-field span {
+  color: #617082;
+  font-size: 0.78rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.critical-part-add .btn {
+  margin-top: 1rem;
+}
+
 @media (max-width: 991px) {
   .line-type-panel {
     align-items: stretch;
@@ -1236,6 +1417,14 @@
   }
 
   .status-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .critical-part-field-groups {
+    grid-template-columns: 1fr;
+  }
+
+  .coverage-day-grid {
     grid-template-columns: 1fr;
   }
 
@@ -1303,6 +1492,10 @@
   }
 
   .plan-summary-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .critical-part-grid {
     grid-template-columns: 1fr;
   }
 }

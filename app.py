@@ -33,7 +33,15 @@ def parse_excel(file_bytes):
     try:
         df = pd.read_excel(io.BytesIO(file_bytes), header=0)
     except Exception:
-        df = pd.read_csv(io.BytesIO(file_bytes), header=0)
+        last_error = None
+        for encoding in ('utf-8-sig', 'utf-8', 'cp1252', 'latin1'):
+            try:
+                df = pd.read_csv(io.BytesIO(file_bytes), header=0, encoding=encoding)
+                break
+            except UnicodeDecodeError as error:
+                last_error = error
+        else:
+            raise last_error
         
     df.columns = df.columns.astype(str).str.strip()
     return df
@@ -279,6 +287,161 @@ def parse_frame_status_report(file_bytes):
             frame_statuses[dsn_key] = status
 
     return frame_statuses
+
+
+def normalize_part_number_value(value):
+    if pd.isna(value):
+        return ''
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value)).strip().replace('.', '')
+    return str(value).strip().replace('.', '')
+
+
+def normalize_text_value(value):
+    if pd.isna(value):
+        return ''
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value)).strip()
+    return str(value).strip()
+
+
+def normalize_requirement_qty(value):
+    if pd.isna(value):
+        return ''
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return str(value).strip()
+
+
+def get_requirement_status(cell):
+    color = normalize_fill_hex(cell)
+    status_by_color = {
+        'D0021B': 'SHORTAGE',
+        '7ED321': 'AVAILABLE',
+        '9B9B9B': 'NOT IN DEMAND',
+    }
+    return status_by_color.get(color, '')
+
+
+def aggregate_requirement_status(statuses):
+    normalized_statuses = {status for status in statuses if status}
+    if 'SHORTAGE' in normalized_statuses:
+        return 'SHORTAGE'
+    if 'AVAILABLE' in normalized_statuses:
+        return 'AVAILABLE'
+    if 'NOT IN DEMAND' in normalized_statuses:
+        return 'NOT IN DEMAND'
+    return ''
+
+
+def build_requirement_coverage_from_sheet(row):
+    coverage_config = [
+        ('N', 29, 30),
+        ('N+1', 33, 34),
+        ('N+2', 37, 38),
+    ]
+    coverage = []
+    for day_label, a_index, b_index in coverage_config:
+        a_cell = row[a_index] if len(row) > a_index else None
+        b_cell = row[b_index] if len(row) > b_index else None
+        a_status = get_requirement_status(a_cell) if a_cell else ''
+        b_status = get_requirement_status(b_cell) if b_cell else ''
+        coverage.append({
+            'day': day_label,
+            'dayStatus': aggregate_requirement_status([a_status, b_status]),
+            'shifts': [
+                {
+                    'label': 'A Shift',
+                    'qty': normalize_requirement_qty(a_cell.value) if a_cell else '',
+                    'status': a_status,
+                },
+                {
+                    'label': 'B Shift',
+                    'qty': normalize_requirement_qty(b_cell.value) if b_cell else '',
+                    'status': b_status,
+                },
+            ],
+        })
+    return coverage
+
+
+def build_requirement_coverage_from_values(row_values):
+    coverage_config = [
+        ('N', 29, 30),
+        ('N+1', 33, 34),
+        ('N+2', 37, 38),
+    ]
+    coverage = []
+    for day_label, a_index, b_index in coverage_config:
+        a_value = row_values[a_index] if len(row_values) > a_index else ''
+        b_value = row_values[b_index] if len(row_values) > b_index else ''
+        coverage.append({
+            'day': day_label,
+            'dayStatus': '',
+            'shifts': [
+                {
+                    'label': 'A Shift',
+                    'qty': normalize_requirement_qty(a_value),
+                    'status': '',
+                },
+                {
+                    'label': 'B Shift',
+                    'qty': normalize_requirement_qty(b_value),
+                    'status': '',
+                },
+            ],
+        })
+    return coverage
+
+
+def parse_critical_part_details_from_table(file_bytes, part_number):
+    df = parse_excel(file_bytes)
+    target_part = normalize_part_number_value(part_number).upper()
+    for _, row in df.iterrows():
+        row_values = list(row)
+        if len(row_values) < 8:
+            continue
+        current_part = normalize_part_number_value(row_values[0])
+        if current_part.upper() != target_part:
+            continue
+        return {
+            'partNumber': current_part,
+            'partDescription': normalize_text_value(row_values[1]),
+            'vendorName': normalize_text_value(row_values[4]),
+            'l4Name': normalize_text_value(row_values[6]),
+            'pmcName': normalize_text_value(row_values[7]),
+            'requirementCoverage': build_requirement_coverage_from_values(row_values),
+        }
+    return None
+
+
+def parse_critical_part_details(file_bytes, part_number):
+    target_part = normalize_part_number_value(part_number).upper()
+    if not target_part:
+        return None
+
+    try:
+        workbook = load_workbook(io.BytesIO(file_bytes), data_only=True)
+    except Exception:
+        return parse_critical_part_details_from_table(file_bytes, part_number)
+
+    sheet = workbook.active
+    for row in sheet.iter_rows(min_row=2):
+        if len(row) < 8:
+            continue
+        current_part = normalize_part_number_value(row[0].value)
+        if current_part.upper() != target_part:
+            continue
+        return {
+            'partNumber': current_part,
+            'partDescription': normalize_text_value(row[1].value),
+            'vendorName': normalize_text_value(row[4].value),
+            'l4Name': normalize_text_value(row[6].value),
+            'pmcName': normalize_text_value(row[7].value),
+            'requirementCoverage': build_requirement_coverage_from_sheet(row),
+        }
+
+    return None
 
 
 def analyze_sequence(df, shortages, engine_transmission_statuses=None, axle_statuses=None, frame_statuses=None, opening_hold_keys=None, line_type='HDT'):
@@ -847,6 +1010,26 @@ def analyze():
         return jsonify({'error': f"Processing error: {str(e)}"}), 500
 
 
+@app.route('/api/critical-part-details', methods=['POST'])
+def critical_part_details():
+    report_file = request.files.get('seven_days_report_file')
+    part_number = request.form.get('part_number', '')
+
+    if not part_number.strip():
+        return jsonify({'error': 'Enter a part number.'}), 400
+    if not report_file or not report_file.filename:
+        return jsonify({'error': 'Upload the 7 days report before looking up part details.'}), 400
+
+    try:
+        details = parse_critical_part_details(report_file.read(), part_number)
+        if not details:
+            return jsonify({'error': 'Part number was not found in the 7 days report.'}), 404
+        return jsonify(details)
+    except Exception as e:
+        print(f"Critical part lookup failed: {str(e)}")
+        return jsonify({'error': f"Critical part lookup failed: {str(e)}"}), 500
+
+
 @app.route('/api/save-constraints', methods=['POST'])
 def save_constraints():
     mapped_columns = parse_json_field('mapped_columns', [])
@@ -886,6 +1069,7 @@ def save_constraints():
         file_groups = [
             ('opening_report_file', 'opening_report'),
             ('mod_report_file', 'mod_report'),
+            ('seven_days_report_file', 'seven_days_report'),
             ('engine_status_file', 'engine_transmission_status'),
             ('axle_status_file', 'axle_status'),
             ('frame_status_file', 'frame_status'),
