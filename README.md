@@ -32,11 +32,13 @@ The Sequence Analyzer is a production-planning web application for analyzing veh
 - Vehicle orders that are explicitly marked as `HOLD`.
 - Vehicles that appear to be skipped or trapped in an out-of-sequence block.
 - Sequence gaps caused by abnormal serial-number movement.
-- Impacted vehicle models, variants, work-content classes, and domestic/export regions.
+- Impacted vehicle models, variants, HDT work-content classes, and domestic/export regions.
 - Part-shortage impact when shortage files and remaining stock quantities are supplied.
 - Opening and mid-day MOD report comparison using the same mapped constraints.
-- Engine and transmission status mapping by order number.
-- Scheduled production dates, line sequence numbers, and line-in-time values based on capacity and working-day rules.
+- Engine, transmission, and axle status mapping by order number.
+- Engine, transmission, and axle status color highlighting in the preview.
+- Scheduled production dates, line sequence numbers, release sequence numbers, and line-in-time values based on capacity and working-day rules.
+- Current-day plan summary and aggregate delivery status views.
 
 The application is built as a Flask backend with a React/Vite frontend. The backend performs file parsing and sequence analysis. The frontend handles the operator workflow, visual dashboards, schedule projection, CSV exports, and reason/outlook annotation.
 
@@ -47,13 +49,13 @@ At a high level, the system works like this:
 1. The user opens the landing page and enters the analyzer.
 2. The user selects either the HDT or MDT analyzer. Each can run in its own browser tab.
 3. The user configures production capacity, start date, holidays, and optional shortage inputs.
-4. The user uploads an opening report and, optionally, a MOD report and engine/transmission status report.
+4. The user uploads an opening report and, optionally, a MOD report, engine/transmission status report, and axle status report.
 5. The frontend submits each available report and shared mapping metadata to `POST /api/analyze`.
 6. The Flask backend reads the uploaded file into a Pandas DataFrame.
 7. The backend detects required columns, classifies vehicle records, detects holds and skips, maps shortage/status columns, and returns JSON.
 8. The React frontend normalizes the JSON response.
 9. The frontend applies HDT or MDT production scheduling rules to the returned preview data.
-10. Charts, anomaly tables, hold/skip tables, data preview, shortage heatmap, and inference cards are rendered for the selected report view.
+10. Charts, anomaly tables, hold/skip tables, data preview, shortage heatmap, inference cards, current-day plan summary, and aggregate delivery status are rendered for the selected report view.
 11. The user can annotate reasons/outlooks and export CSV data.
 
 ## Repository Layout
@@ -228,17 +230,20 @@ The current React UI supports this operator flow:
    - HDT and MDT keep separate saved workspaces in the browser.
 3. Enter production capacity.
 4. Select the production start date.
-5. Add optional holidays.
+5. Open `Settings` to adjust shift timing, breaks, and lunch windows.
 6. Upload one or more shortage variant files in Step 2.
    - Part number is derived from the uploaded filename.
    - Dots in the filename are ignored for the part number.
-   - User can enter part name, reference order, and available quantity for each uploaded file.
+   - User can enter part name, reference order, available quantity, and usage quantity per vehicle for each uploaded file.
 7. Upload Step 3 reports:
    - Opening Report: required first.
    - MOD Report: optional mid-day updated report.
    - Engine & Transmission Status Report: optional shared mapping file.
+   - Axle Status Report: optional shared status mapping file based on Column B order and Column E color.
+   - Frame Status Report: optional HDT shared status mapping file based on Column C DSN and Column AD status.
+   - For MOD reports, enter the line sequence number for the first non-skip `TRIM LINE` vehicle.
 8. Click `Analyze`.
-9. Review Opening or MOD analytics using the report-view selector:
+9. Review Opening, MOD, or HDT Plan analytics using the report-view selector:
    - Hold count
    - Skip count
    - Hold/skip charts
@@ -247,10 +252,28 @@ The current React UI supports this operator flow:
    - Hold order table
    - Full data preview
    - Shortage impact cards
-10. Optionally add skip/hold reasons and outlook dates.
-11. Download CSV exports.
+   - Aggregate Status Against Delivery, including A/B shift vehicle counts for HDT.
+   - Plan message with current-day HDT counts or MDT BUS and longer-wheel-base counts.
+10. Use `Save Constraints` below Data Preview to create the day-opening backup.
+11. Optionally add skip/hold reasons and outlook dates.
+12. Download CSV exports.
 
 Inputs and analysis data are saved in the browser with IndexedDB. Refreshing the page restores the current line's workspace, including uploaded files, shortage mappings, report files, annotations, and analysis results. The `Reset` button clears the saved workspace for the current HDT or MDT tab.
+
+The `Save Constraints` action creates a local backup folder:
+
+```text
+Sequence_Backup/YYYY-MM-DD/
+```
+
+The dated folder contains:
+
+- `Mapped_Day_Opening_Report.xlsx`
+- `Mapped_Day_Opening_Report.csv`
+- `Day_Opening_Summary.pdf`
+- `source_files/` copies of the opening report, optional MOD report, engine/transmission status report, axle status report, HDT frame status report, and shortage variant files uploaded for constraint mapping.
+
+The PDF records the day-opening summary, chart breakdown values, aggregate engine/transmission/axle/frame coverage, and shortage impact analysis.
 
 ## Input File Requirements
 
@@ -273,7 +296,7 @@ The analyzer attempts to discover important columns by name first, then falls ba
 | DSN | `DSN`, `Delivery Sequence Number` | Column C / index 2 | No |
 | Serial Number | `Serial Number` | Column D / index 3 | Yes |
 | Variant | `Variant` | Column G / index 6 | Needed for classification and shortage mapping |
-| Description | `Description` | Column H / index 7 | Needed for model/work-content classification |
+| Description | `Description` | Column H / index 7 | Needed for model classification and HDT work-content classification |
 | Status | `Status` | Column I / index 8 | Needed for skip detection |
 | Vehicle Order State | `Vehicle Order State`, `State` | Column J / index 9 | Yes |
 | Order Number | `Order Number`, `Order No` | Name only | Optional |
@@ -303,6 +326,7 @@ Each shortage row can include a separate uploaded file. The frontend also suppor
 - Each matching variant in the main sequence is evaluated against available quantity.
 - Part number is derived from the uploaded filename, with the extension removed and dots ignored.
 - Part name is entered manually by the user and displayed in shortage impact analysis.
+- Usage per vehicle defaults to `1`. If usage is higher, stock coverage is calculated by consuming that many parts per connected vehicle.
 
 ### Engine and transmission status report
 
@@ -310,7 +334,7 @@ The optional Engine & Transmission Status Report maps additional statuses into t
 
 | Logical Field | Source Position | Notes |
 | --- | --- | --- |
-| Order Number | Column C / index 2 | Leading `00` is ignored before matching. |
+| Order Number | Column C / index 2 | Matching uses the last six digits of the numeric order value. |
 | Engine status | Column J / index 9 | Inserted into Data Preview. |
 | Transmission status | Column L / index 11 | Inserted into Data Preview. |
 
@@ -320,6 +344,48 @@ The backend matches this report to the sequence report by normalized order numbe
 - `Transmission status`
 
 They are inserted immediately to the right of `Hold Status` when `Hold Status` is available.
+
+If an engine status is blank after mapping, the backend checks the 11th character from the left in the `Variant`. When that character is `U` or `T`, the engine status is filled as `Rapid Prime`.
+
+### Axle status report
+
+The optional Axle Status Report maps axle availability into the Data Preview.
+
+| Logical Field | Source Position | Notes |
+| --- | --- | --- |
+| Order Number | Column B / index 1 | Matching uses the last six digits of the numeric order value. |
+| Axle color | Column E / index 4 | Cell fill color is converted into a combined status. |
+
+The backend groups all color entries for the same order and derives `Axle status`:
+
+| Derived status | Color rule |
+| --- | --- |
+| `AVAILABLE` | All mapped color cells are green (`00FF00`). |
+| `IN TRANSIT` | Mapped colors are only green (`00FF00`) and/or yellow (`FFFF00`). |
+| `WIP` | Any mapped color is orange (`FF9900`). |
+| `NOT STARTED` | Any mapped color is grey (`C0C0C0`). |
+
+`Axle status` is inserted before `Country` when that column exists; otherwise, it is appended to the preview.
+
+### Frame status report
+
+The optional HDT Frame Status Report maps frame coverage into the Data Preview. The parser reads `Sheet1` / `Sheet 1` when present.
+
+| Logical Field | Source Position | Notes |
+| --- | --- | --- |
+| DSN | Column C / index 2 | Matching uses the last six digits of the numeric DSN value. |
+| Frame status | Column AD / index 29 | Status text is mapped directly into the preview. |
+| Frame note | Column AE / index 30 | Used to detect `Part Shortage` when AD is `To Be Prod`. |
+
+Frame status normalization:
+
+| Source condition | Preview status |
+| --- | --- |
+| AD is `DICV DOL`, `Transit`, or `SMS FG` | `COVERED` |
+| AD is `To Be Prod` and AE mentions `Part Shortage` | `Part Shortage` |
+| AD is `To Be Prod` and AE does not mention part shortage | `To Be Prod` |
+
+`Frame status` is inserted immediately to the right of `Axle status` when that column exists; otherwise, it is appended to the preview.
 
 ## Backend Architecture
 
@@ -409,6 +475,7 @@ Shortage fields:
 | `shortage_parts` | Repeated string | No | Part numbers entered by the user. |
 | `shortage_refs` | Repeated string | No | Reference order numbers where shortage counting begins. |
 | `shortage_qtys` | Repeated string/integer | No | Available stock quantity after the reference order. |
+| `shortage_usages` | Repeated string/integer | No | Part usage per connected vehicle. Defaults to `1`. |
 | `shortage_files` | Repeated file | No | Variant mapping files. Variants are read from Column F. |
 
 Status mapping fields:
@@ -416,6 +483,19 @@ Status mapping fields:
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `engine_status_file` | File | No | Engine/transmission status report. Column C order number maps to Column J engine status and Column L transmission status. |
+| `axle_status_file` | File | No | Axle status workbook. Column B order number maps Column E fill colors to an axle status. |
+
+MOD context fields:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `opening_hold_keys` | Repeated string | No | Vehicle/order keys that were `HOLD` in the Opening report. Used so released HOLD vehicles in MOD are not counted as skip vehicles only because their serial breaks sequence. |
+
+Line context fields:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `line_type` | String | No | Analyzer line, `HDT` or `MDT`. Used for line-specific model derivation and frontend scheduling context. Defaults to `HDT`. |
 
 The frontend sends repeated fields in matching order. The backend processes entries up to:
 
@@ -490,7 +570,7 @@ Processing error:
 The main analysis function is:
 
 ```python
-analyze_sequence(df, shortages, engine_transmission_statuses=None)
+analyze_sequence(df, shortages, engine_transmission_statuses=None, axle_statuses=None, opening_hold_keys=None, line_type='HDT')
 ```
 
 It returns:
@@ -501,7 +581,9 @@ It returns:
 - Gap/anomaly block records.
 - Full preview columns and row data.
 
-When an engine/transmission status report is supplied, the backend maps those statuses by normalized order number and inserts `Engine status` and `Transmission status` into the preview data.
+When an engine/transmission status report is supplied, the backend maps those statuses by normalized order number and inserts `Engine status` and `Transmission status` into the preview data. Order matching uses the last six digits of the numeric order value.
+
+When an axle status report is supplied, the backend reads Column E cell colors with OpenPyXL, groups them by normalized Column B order number, derives `Axle status`, and inserts the result into the preview data.
 
 ### Empty file behavior
 
@@ -534,13 +616,20 @@ They are inserted immediately after `Description` when possible.
 Model extraction is based on the `Description` field:
 
 - Empty or missing descriptions become `Unknown`.
+- For MDT bus variants, the model is the first four description characters.
+- For other MDT descriptions that start with a numeric token, the model is that token. For example, `917 CHS` becomes `917`.
+- For other MDT variants, description characters 5-6 as `RE` or `RD` use the first six characters.
+- For other MDT variants, description character 5 as `R` or `C` uses the first five characters.
+- Other MDT descriptions use the first four characters.
 - If the description has at least six characters and character 6 is `T`, `S`, or `M`, the model is the first six characters.
 - Otherwise, if the description has at least five characters, the model is the first five characters.
 - Shorter descriptions are used as-is.
 
 ### Work content classification
 
-`Work Content` is classified as `HWC` or `LWC`.
+For HDT, `Work Content` is classified as `HWC` or `LWC`.
+
+MDT does not use the High Work Content / Low Work Content concept, so `Work Content` is not added to MDT preview data, hold/skip tables, CSV exports, or W/C charts.
 
 Rules:
 
@@ -594,6 +683,12 @@ A row becomes a skip record only when:
 - It is part of an out-of-sequence anomaly block, and
 - Its `Status` is `TRIM LINE`.
 
+For MDT, out-of-sequence rows in statuses other than `TRIM LINE` do not reset the last valid sequence anchor and are not counted as skip vehicles. For example, if the last valid `FRAME LOADED` serial is `70975`, a later `FRAME LOADED` row with serial `70956` is ignored for skip anchoring. The next `TRIM LINE` serial `70941` is treated as the skip vehicle, and serial `70976` resumes the normal sequence.
+
+For HDT, the previous anchor behavior is retained: an out-of-sequence row outside `TRIM LINE` can become the new sequence anchor before later `TRIM LINE` rows are evaluated.
+
+For MOD analysis, the frontend sends the vehicle/order keys that were `HOLD` in the Opening report. If one of those vehicles appears in MOD in a non-HOLD state, the backend treats it as released from HOLD and does not count that row as a skip vehicle solely because its serial number does not follow the sequence. Normal skip detection remains unchanged for other vehicles.
+
 The analyzer tracks:
 
 - `last_valid_seq`
@@ -626,6 +721,7 @@ For each shortage row, the user enters:
 - Part name
 - Reference order
 - Available quantity
+- Usage quantity per vehicle, defaulting to `1`
 
 Part number is derived from the uploaded variant filename. The extension is removed and dots in the filename are ignored.
 
@@ -636,7 +732,8 @@ The backend creates a `shortages` dictionary:
   "PART_NUMBER": {
     "variants": {"VARIANT_A", "VARIANT_B"},
     "ref_order": "ORDER123",
-    "qty": 10
+    "qty": 10,
+    "usage": 1
   }
 }
 ```
@@ -657,14 +754,16 @@ If the reference order is not found:
 For rows where the main sequence variant is connected to the part:
 
 - If the row is before `start_idx`, it is `Covered`.
-- If available quantity is greater than zero, it is `Covered` and quantity decrements.
+- If available quantity is greater than or equal to the usage quantity, it is `Covered` and quantity decrements by the usage quantity.
 - Once quantity reaches zero, connected rows are marked as shortage.
+
+Example: if available quantity is `5` and usage is `2`, two vehicles are covered and the next connected vehicle is marked shortage.
 
 ### Preview columns
 
 Each shortage part becomes an inserted preview column. It is inserted after `Hold Status` when that column exists; otherwise, it is appended near the end of the preview.
 
-If an engine/transmission status report is uploaded, `Engine status` and `Transmission status` are inserted to the right of `Hold Status` before shortage columns.
+If an engine/transmission status report is uploaded, `Engine status` and `Transmission status` are inserted to the right of `Hold Status` before shortage columns. If an axle status report is uploaded, `Axle status` is inserted before `Country` when available, otherwise near the end of the preview.
 
 ### Frontend shortage heatmap
 
@@ -710,7 +809,10 @@ It includes:
 The main `App` component stores:
 
 - `reportFiles`: Opening and MOD uploaded sequence files.
+- `reportUploadedAt`: Upload timestamps for Opening and MOD reports. The MOD timestamp is used for MOD line-in-time scheduling.
+- `modStartSequence`: User-entered line sequence number for the first non-skip MOD `TRIM LINE` vehicle.
 - `engineStatusFile`: Optional engine/transmission status report.
+- `axleStatusFile`: Optional axle status report.
 - `dragActiveReport`: Drag/drop UI state for report cards.
 - `capacity`: Daily production capacity.
 - `startDate`: Production start date.
@@ -719,7 +821,7 @@ The main `App` component stores:
 - `holidays`: List of excluded dates.
 - `shortages`: User-entered shortage rows.
 - `analyses`: Normalized backend analysis results for Opening and MOD.
-- `activeReport`: Selected analytics view, Opening or MOD.
+- `activeReport`: Selected analytics view, Opening, MOD, or HDT Plan.
 - `reasonConfig`: Skip/hold reason and outlook annotations.
 - `showLanding`: Whether landing screen is visible.
 - `loading`: API request state.
@@ -734,7 +836,12 @@ The app also persists the workspace in IndexedDB using a separate key per line t
 | `normalizeData` | Converts backend JSON into stable frontend field names. |
 | `createShortageRow` | Creates one editable shortage input row. |
 | `runAnalysis` | Builds `FormData`, calls `/api/analyze` for each uploaded report, stores results. |
-| `applySequence` | Adds line sequence, production date, and line time to preview rows. |
+| `applySequence` | Adds line sequence, production date, line time, and release sequence to preview rows. |
+| `applyReleaseSequence` | Adds `Release sequence` from the first `PBS` + `CREATED` row, preserving MOD baseline release numbers when available. |
+| `buildOpeningHoldKeys` | Builds the Opening HOLD key list used for MOD released-HOLD handling. |
+| `buildVehicleKeySet` | Builds lookup keys for skip rows so MOD scheduling can find the first non-skip `TRIM LINE` vehicle. |
+| `buildCurrentDayStatusSummary` | Builds the Aggregate Status Against Delivery tables for engine, transmission, and axle status. |
+| `buildPlanSummary` | Builds the HDT Plan message and current-day line-in vehicle list from the Opening report. |
 | `buildInference` | Builds shortage impact cards from sequenced preview data. |
 | `applySkipHoldReasons` | Inserts reason/outlook columns into preview data. |
 | `readWorkspace` / `writeWorkspace` / `clearWorkspace` | Persist and restore the browser workspace via IndexedDB. |
@@ -751,6 +858,8 @@ The app also persists the workspace in IndexedDB using a separate key per line t
 | `StatCard` | Summary KPI card. |
 | `PieChartCard` | Hold/skip model pie chart panel. |
 | `BarChartCard` | Type, work-content, and region chart panel. |
+| `StatusSummaryTable` | Aggregate delivery status table for engine, transmission, or axle status counts. |
+| `PlanSummaryView` | HDT current-day plan message and line-in vehicle list. |
 | `ResultsTable` | Hold/skip detail table with reason/outlook editing. |
 | `ReasonControls` | Group-level reason/outlook controls. |
 | `OrderCell` | Table cell renderer for state-sensitive values. |
@@ -763,13 +872,22 @@ Production scheduling is performed on the frontend after the backend returns pre
 
 ### Starting point
 
-Scheduling starts from the first preview row whose `Status` is:
+For Opening reports, scheduling starts from the first preview row whose `Status` is:
 
 ```text
 TRIM LINE
 ```
 
 Rows before this point receive empty scheduling fields.
+
+For MOD reports:
+
+- The user enters the line sequence number for the first non-skip `TRIM LINE` vehicle.
+- The frontend ignores rows that are present in the MOD Skip Orders list when choosing this first MOD scheduling anchor.
+- The first non-skip `TRIM LINE` vehicle receives the user-entered line sequence number.
+- MOD `Line in time` starts from the timestamp when the MOD file was uploaded.
+- After the current shift ends, scheduling rolls to the next working day and then follows the same daily capacity and break logic as the Opening report.
+- Rows above the first non-skip `TRIM LINE` scheduling anchor receive empty scheduling fields.
 
 ### Added scheduling columns
 
@@ -778,8 +896,11 @@ The frontend adds:
 - `Line in sequence`
 - `Production Date`
 - `Line in time`
+- `Release sequence`
 
 These are inserted after `Status` when `Status` exists; otherwise, they are inserted at the beginning.
+
+`Release sequence` starts from the first row whose `Status` is `PBS` and whose order state is `CREATED`. It follows the same daily capacity, Thursday adjustment, working-day, and holiday rules as line sequencing. For MOD reports, an existing Opening release-sequence baseline is reused when the same vehicle/order key is found.
 
 ### Working-day rules
 
@@ -816,12 +937,19 @@ MDT uses a single-shift timing model:
 
 - Working window: `07:00` to `16:45`
 - Production minutes: `541`
-- Thursday uses the same minutes for now.
+- Thursday production minutes: `481`
 
 For MDT:
 
 ```text
 takt time = 541 / capacity
+```
+
+For MDT Thursdays:
+
+```text
+adjusted capacity = floor(capacity * 481 / 541)
+takt time = 481 / adjusted capacity
 ```
 
 ### Shift start
@@ -855,6 +983,17 @@ MDT uses the day-shift breaks only:
 
 The scheduling functions skip over breaks when assigning line-in-time values.
 
+On Thursdays, both HDT and MDT also include a planned stop from `08:30` to `09:30`.
+
+### MOD shift end behavior
+
+MOD line-in-time scheduling continues from the MOD upload time until the line-specific shift end:
+
+- HDT: `02:20 AM` next day.
+- MDT: `04:45 PM` same day.
+
+After the shift end is reached, line sequence resets for the next working day.
+
 ## Charts, Tables, and Exports
 
 ### Charts
@@ -864,10 +1003,10 @@ The dashboard renders:
 - Hold orders by model as a pie chart.
 - Skip orders by model as a pie chart.
 - Hold orders by vehicle type.
-- Hold orders by work content.
+- Hold orders by work content for HDT.
 - Hold orders by region.
 - Skip orders by vehicle type.
-- Skip orders by work content.
+- Skip orders by work content for HDT.
 - Skip orders by region.
 
 Chart tooltips include useful breakdown details where available.
@@ -877,6 +1016,8 @@ Chart tooltips include useful breakdown details where available.
 The UI includes:
 
 - Opening/MOD analytics view selector.
+- Plan & Summary selector view.
+- Aggregate Status Against Delivery panel.
 - Out-of-sequence anomaly block table.
 - Skip orders table.
 - Hold orders table.
@@ -888,6 +1029,90 @@ When available, preview data also includes:
 
 - `Engine status`
 - `Transmission status`
+- `Axle status`
+- `Frame status` for HDT.
+
+### Aggregate Status Against Delivery
+
+The analytics view includes an `AGGREGATE STATUS AGAINST DELIVERY` panel for the current scheduled production day.
+
+- HDT is split into `A shift` and `B shift`, using `Line in time` before or after `04:45 PM`.
+- Shift headers show counts as `<count> Vehicles in sequence`.
+- MDT shows one current-day aggregate table set.
+- Each table counts statuses for `Engine status`, `Transmission status`, `Axle status`, and HDT `Frame status`.
+- Engine and transmission summaries are shown in the first row. Axle and frame coverage summaries are shown below.
+- For engine summary counts, `FG`, `Booked not yet stored`, and `Retrieval Trigger Received` are grouped under `FG`.
+
+### Plan view
+
+For Opening analysis, the report selector includes `Plan & Summary`.
+
+For HDT, the Plan view shows a current-day plan message with:
+
+- BUS order count and model split.
+- BUS Podest opening FG count from the Podest state column.
+- Rapid Prime count and model split.
+- Vajra count and model split.
+- Special variant counts for `40KL`, `28 ft Balancer`, and `4828RT`.
+- BRO count based on descriptions ending in `RB`.
+- Current-day line-in vehicle list from the Opening report.
+
+For MDT, the Plan view shows:
+
+- BUS order count and model split. BUS identification uses the same variant-prefix logic as HDT.
+- BUS Podest opening FG count from the Podest state column.
+- Longer wheel base vehicle count, calculated from current-day line-in Opening rows.
+- Current-day line-in vehicle list from the Opening report.
+
+MDT longer wheel base values are assigned from the description using the first matching rule:
+
+| Description pattern | Value |
+| --- | --- |
+| `3160`, `3760`, `4250`, `4500`, or `3360` | `0` |
+| `5100` | `0.2` |
+| `5050`, `5300`, or `5900` | `0.22` |
+| `6700` | `0.35` |
+| Bus with `4800` | `0.22` |
+| Truck with `4800`, or no matched pattern | `0` |
+
+The assigned values are summed and rounded up to the next whole number for the displayed Longer wheel base vehicle count.
+
+### Status color highlighting
+
+Engine, transmission, and axle status cells keep their own colors even when the row is also highlighted by shortage impact.
+
+Engine status colors:
+
+| Color | Status text |
+| --- | --- |
+| Light green | `Consumes`, `Consumed`, `Dressing`, `FG`, `Booked not yet stored`, `Rapid Prime`, `Retrieval Trigger Received` |
+| Light yellow | `Paint Area`, `Tested Buffer`, `Fly Wheel Buffer`, `Fly Wheel Area` |
+| Light red | Any other non-empty engine status |
+
+Transmission status colors:
+
+| Color | Status text |
+| --- | --- |
+| Light green | `Dressing`, `Consumed`, `Retrieval Trigger Received`, `Retrieved`, `Retreived`, `FG` |
+| Light yellow | `Test Completed Buffer`, `Re-Oil Filled Buffer` |
+| Light red | Any other non-empty transmission status |
+
+Axle status colors:
+
+| Color | Status text |
+| --- | --- |
+| Light green | `AVAILABLE` |
+| Light yellow | `IN TRANSIT` |
+| Light orange | `WIP` |
+| Light red | `NOT STARTED` |
+
+Frame status colors:
+
+| Color | Status text |
+| --- | --- |
+| Light green | `COVERED` |
+| Light orange | `To Be Prod`, `Yet to Start`, `WIP` |
+| Light red | `Part Shortage` |
 
 ### Reason and outlook annotations
 
@@ -1054,16 +1279,23 @@ Recommended manual validation:
 6. Confirm skip count against known out-of-sequence `TRIM LINE` rows.
 7. Add shortage files with known variants.
 8. Confirm derived part numbers ignore dots in filenames.
-9. Confirm covered rows and shortage rows match available quantity.
+9. Confirm covered rows and shortage rows match available quantity divided by usage quantity.
 10. Upload an engine/transmission status report and confirm statuses map by order number.
-11. Enter capacity and start date.
-12. Confirm scheduling starts at the first `TRIM LINE` row.
-13. Confirm Sundays and holidays are skipped.
-14. Upload a MOD report and confirm Opening/MOD analytics can be switched.
-15. Refresh the browser and confirm workspace inputs/files/analysis restore.
-16. Download CSV files and inspect columns.
-17. Build frontend with `npm run build`.
-18. Confirm Flask serves the built React app from `http://127.0.0.1:5050`.
+11. Upload an axle status report and confirm `AVAILABLE`, `IN TRANSIT`, `WIP`, and `NOT STARTED` map from Column E colors.
+12. Confirm blank engine statuses become `Rapid Prime` when the 11th variant character is `U` or `T`.
+13. Confirm engine/transmission/axle status cell colors match their status groups.
+14. Enter capacity and start date.
+15. Confirm Opening scheduling starts at the first `TRIM LINE` row.
+16. Confirm `Release sequence` starts from the first `PBS` + `CREATED` row.
+17. Upload a MOD report, enter the MOD first non-skip `TRIM LINE` sequence, and confirm MOD scheduling starts from the MOD upload time.
+18. Confirm Sundays, holidays, normal breaks, and the Thursday `08:30` to `09:30` planned stop are skipped.
+19. Confirm Opening/MOD/Plan analytics can be switched where available.
+20. Confirm Aggregate Status Against Delivery shows shift counts as `Vehicles in sequence`.
+21. Confirm released HOLD vehicles in MOD show `Released` in Skip/Hold reason and are not counted as skip solely because their serial breaks sequence.
+22. Refresh the browser and confirm workspace inputs/files/analysis restore.
+23. Download CSV files and inspect columns.
+24. Build frontend with `npm run build`.
+25. Confirm Flask serves the built React app from `http://127.0.0.1:5050`.
 
 Recommended future automated tests:
 
@@ -1132,6 +1364,7 @@ Check:
 - Variant strings match the main report after trimming and uppercase conversion.
 - The derived part number is not blank after removing the file extension and dots.
 - The shortage file was selected in the same row as the part number.
+- Usage per vehicle is not higher than the available stock for the vehicles you expect to be covered.
 - The reference order exists if you expect counting to begin at a specific point.
 
 ### Engine/transmission statuses are blank
@@ -1142,7 +1375,16 @@ Check:
 - Order numbers are in Column C.
 - Engine status is in Column J.
 - Transmission status is in Column L.
-- The status report order number matches the main report after removing the two leading `00` characters.
+- The status report order number matches the main report by the last six numeric digits.
+
+### Axle statuses are blank
+
+Check:
+
+- The axle status report is an Excel workbook with visible fill colors.
+- Order numbers are in Column B.
+- Axle status colors are in Column E.
+- The axle report order number matches the main report by the last six numeric digits.
 
 ### Saved workspace does not restore
 
@@ -1194,7 +1436,10 @@ This means `frontend/dist/index.html` is missing. Build the frontend or use the 
 | Domestic | Vehicle whose variant starts with `V`. |
 | Export | Vehicle whose variant does not start with `V`. |
 | Takt Time | Time interval between planned unit completions, calculated from available minutes and capacity. |
+| Line in Sequence | Sequence number assigned to vehicles entering the line from `TRIM LINE`. |
+| Release Sequence | Sequence number assigned from the first `PBS` + `CREATED` row. |
 | Reference Order | Order number used as the point where shortage quantity counting starts. |
+| Usage / Vehicle | Number of pieces of the same part consumed by one connected vehicle. |
 | Connected Row | A row whose variant is listed in a shortage part's variant file. |
 | Covered | A connected row that is still covered by available stock quantity. |
 | Shortage | A connected row after available stock quantity has been exhausted. |
@@ -1203,3 +1448,7 @@ This means `frontend/dist/index.html` is missing. Build the frontend or use the 
 | Opening Report | Morning report used as the first analysis baseline. |
 | MOD Report | Mid-day updated report analyzed with the same mapped constraints. |
 | Engine/Transmission Status Report | Optional report that maps order number to engine and transmission status. |
+| Axle Status Report | Optional workbook that maps order number and cell color to axle status. |
+| Aggregate Status Against Delivery | Current-day status summary for engine, transmission, and axle status against sequenced delivery rows. |
+| Plan & Summary | Opening report view with current-day plan counts and line-in vehicle list. |
+| Released HOLD | A vehicle that was `HOLD` in Opening and appears in MOD in any non-HOLD state. |

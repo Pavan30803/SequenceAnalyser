@@ -1,0 +1,130 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [5 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Length 1417 >>
+stream
+BT
+/F1 10 Tf
+50 790 Td
+14 TL
+(Day Opening Constraint Backup) Tj
+T*
+(Generated: 2026-04-30 08:11:00) Tj
+T*
+() Tj
+T*
+(Opening Summary) Tj
+T*
+(---------------) Tj
+T*
+(Line type: HDT) Tj
+T*
+(Mapped report rows: 1287) Tj
+T*
+(Hold orders: 4) Tj
+T*
+(Skip vehicles: 0) Tj
+T*
+() Tj
+T*
+(Charts) Tj
+T*
+(------) Tj
+T*
+(Hold by model: 1624 = 1) Tj
+T*
+(Hold by model: 1924 = 3) Tj
+T*
+(Skip by model: No data) Tj
+T*
+(Hold by type: Bus = 4) Tj
+T*
+(Hold by type: Truck = 0) Tj
+T*
+(Skip by type: Bus = 0) Tj
+T*
+(Skip by type: Truck = 0) Tj
+T*
+(Hold by work content: HWC = 4) Tj
+T*
+(Hold by work content: LWC = 0) Tj
+T*
+(Skip by work content: HWC = 0) Tj
+T*
+(Skip by work content: LWC = 0) Tj
+T*
+(Hold by region: Domestic = 4) Tj
+T*
+(Hold by region: Export = 0) Tj
+T*
+(Skip by region: Domestic = 0) Tj
+T*
+(Skip by region: Export = 0) Tj
+T*
+() Tj
+T*
+(Engine / Transmission / Axle / Frame Coverage) Tj
+T*
+(---------------------------------------------) Tj
+T*
+(Production date: 2026-04-30) Tj
+T*
+(Vehicles in sequence: 101) Tj
+T*
+(A shift: 48 Vehicles in sequence) Tj
+T*
+(Engine: No data) Tj
+T*
+(Transmission: No data) Tj
+T*
+(Axle: No data) Tj
+T*
+(Frame: No data) Tj
+T*
+(B shift: 53 Vehicles in sequence) Tj
+T*
+(Engine: No data) Tj
+T*
+(Transmission: No data) Tj
+T*
+(Axle: No data) Tj
+T*
+(Frame: No data) Tj
+T*
+() Tj
+T*
+(Shortage Impact Analysis) Tj
+T*
+(------------------------) Tj
+T*
+(No shortage impact cards available) Tj
+T*
+() Tj
+T*
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 4 0 R >>
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000185 00000 n 
+0000001654 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1780
+%%EOF
