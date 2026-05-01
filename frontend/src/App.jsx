@@ -367,10 +367,11 @@ function createCriticalPartRow(patch = {}) {
     partNumber: '',
     partDescription: '',
     vendorName: '',
+    supplierBacklog: '',
     pmcName: '',
     l4Name: '',
+    smName: '',
     pointOfFit: '',
-    platform: '',
     referenceOrderNumber: '',
     availableStock: '',
     expectedQty: '',
@@ -1487,6 +1488,19 @@ function getTableCellClass(column, value, shortageCount) {
   return ''
 }
 
+function isBackToBackHwcCell(rows, rowIndex, column, lineType) {
+  if (lineType !== 'HDT' || column !== 'Work Content') {
+    return false
+  }
+  const currentValue = normalizeLookupKey(rows[rowIndex]?.[column])
+  if (currentValue !== 'HWC') {
+    return false
+  }
+  const previousValue = normalizeLookupKey(rows[rowIndex - 1]?.[column])
+  const nextValue = normalizeLookupKey(rows[rowIndex + 1]?.[column])
+  return previousValue === 'HWC' || nextValue === 'HWC'
+}
+
 function getPreviewRowClass(shortageCount) {
   if (shortageCount === 1) return 'row-shortage-1'
   if (shortageCount === 2) return 'row-shortage-2'
@@ -1851,14 +1865,17 @@ function CriticalPartInfoView({
   sevenDaysReportFile,
   onDraftChange,
   onDraftPartBlur,
+  onDraftRefresh,
   onAddPart,
+  bulkInput,
+  onBulkInputChange,
+  onBulkAdd,
   onPartChange,
   onRemovePart,
 }) {
   const plannerFields = [
     ['Part Number', 'partNumber'],
     ['Point of Fit', 'pointOfFit'],
-    ['Platform', 'platform'],
     ['Reference order number', 'referenceOrderNumber'],
     ['Available stock', 'availableStock'],
     ['Expected qty', 'expectedQty'],
@@ -1867,7 +1884,9 @@ function CriticalPartInfoView({
   const autoFields = [
     ['Part Description', 'partDescription'],
     ['Vendor name', 'vendorName'],
+    ['Supplier backlog', 'supplierBacklog'],
     ['PMC name', 'pmcName'],
+    ['SM name', 'smName'],
     ['L4 name', 'l4Name'],
   ]
   const getCoverageStatusClass = (status) => {
@@ -1878,28 +1897,36 @@ function CriticalPartInfoView({
     return 'coverage-status-neutral'
   }
   const renderCoverage = (coverage = []) => {
-    const safeCoverage = Array.isArray(coverage) && coverage.length ? coverage : [
+    const defaultCoverage = [
       { day: 'N', dayStatus: '', shifts: [{ label: 'A Shift', qty: '', status: '' }, { label: 'B Shift', qty: '', status: '' }] },
       { day: 'N+1', dayStatus: '', shifts: [{ label: 'A Shift', qty: '', status: '' }, { label: 'B Shift', qty: '', status: '' }] },
       { day: 'N+2', dayStatus: '', shifts: [{ label: 'A Shift', qty: '', status: '' }, { label: 'B Shift', qty: '', status: '' }] },
+      { day: 'N+3', dayStatus: '', shifts: [{ label: 'A Shift', qty: '', status: '' }, { label: 'B Shift', qty: '', status: '' }] },
+      { day: 'N+4', dayStatus: '', shifts: [{ label: 'A Shift', qty: '', status: '' }, { label: 'B Shift', qty: '', status: '' }] },
     ]
+    const coverageByDay = new Map((Array.isArray(coverage) ? coverage : []).map((day) => [day.day, day]))
+    const safeCoverage = defaultCoverage.map((day) => ({
+      ...day,
+      ...(coverageByDay.get(day.day) ?? {}),
+    }))
 
     return (
       <div className="coverage-panel">
-        <h6>N, N+1, N+2 Coverage</h6>
+        <h6>N, N+1, N+2, N+3, N+4 Coverage</h6>
         <div className="coverage-day-grid">
           {safeCoverage.map((day) => (
             <div className="coverage-day-card" key={day.day}>
               <div className="coverage-day-header">
                 <strong>{day.day}</strong>
-                <span className={`coverage-status-dot ${getCoverageStatusClass(day.dayStatus)}`} title={day.dayStatus || 'No status'} />
               </div>
               <div className="coverage-shifts">
                 {(day.shifts ?? []).map((shift) => (
                   <div className="coverage-shift-row" key={`${day.day}-${shift.label}`}>
-                    <span>{shift.label}</span>
+                    <div className="coverage-shift-label">
+                      <span className={`coverage-status-dot ${getCoverageStatusClass(shift.status)}`} title={shift.status || 'No status'} />
+                      <span>{shift.label}</span>
+                    </div>
                     <strong>{shift.qty !== '' && shift.qty !== null && shift.qty !== undefined ? shift.qty : '-'}</strong>
-                    <span className={`coverage-status-text ${getCoverageStatusClass(shift.status)}`}>{shift.status || 'No status'}</span>
                   </div>
                 ))}
               </div>
@@ -1912,26 +1939,14 @@ function CriticalPartInfoView({
   const renderField = (record, field, label, onChange, onBlur) => (
     <label className="critical-part-field" key={`${record.id ?? 'draft'}-${field}`}>
       <span>{label}</span>
-      {field === 'platform' ? (
-        <select
-          className="form-select form-select-sm"
-          value={record.platform}
-          onChange={(event) => onChange({ platform: event.target.value })}
-        >
-          <option value="">Select platform</option>
-          <option value="HDT">HDT</option>
-          <option value="MDT">MDT</option>
-        </select>
-      ) : (
-        <input
-          type={field === 'expectedEta' ? 'datetime-local' : field === 'availableStock' || field === 'expectedQty' ? 'number' : 'text'}
-          className="form-control form-control-sm"
-          min={field === 'availableStock' || field === 'expectedQty' ? '0' : undefined}
-          value={record[field]}
-          onBlur={field === 'partNumber' ? onBlur : undefined}
-          onChange={(event) => onChange({ [field]: event.target.value })}
-        />
-      )}
+      <input
+        type={field === 'expectedEta' ? 'datetime-local' : field === 'availableStock' || field === 'expectedQty' ? 'number' : 'text'}
+        className="form-control form-control-sm"
+        min={field === 'availableStock' || field === 'expectedQty' ? '0' : undefined}
+        value={record[field]}
+        onBlur={field === 'partNumber' ? onBlur : undefined}
+        onChange={(event) => onChange({ [field]: event.target.value })}
+      />
     </label>
   )
   const renderGroupedFields = (record, onChange, onPartNumberBlur) => (
@@ -1943,7 +1958,7 @@ function CriticalPartInfoView({
         </div>
       </div>
       <div className="critical-part-field-group critical-part-auto-group">
-        <h6>Auto populated from 7 days report</h6>
+        <h6>Part Details</h6>
         <div className="critical-part-grid">
           {autoFields.map(([label, field]) => renderField(record, field, label, onChange))}
         </div>
@@ -1984,13 +1999,43 @@ function CriticalPartInfoView({
         <div className="critical-part-add">
           <div className="critical-part-add-header">
             <strong>Add part details</strong>
-            {lookupLoading ? <span className="text-secondary small">Looking up part details...</span> : null}
+            <div className="critical-part-refresh-actions">
+              {lookupLoading ? <span className="text-secondary small">Looking up part details...</span> : null}
+              <button
+                type="button"
+                className="btn btn-sm btn-outline-primary fw-semibold"
+                onClick={onDraftRefresh}
+                disabled={lookupLoading || !draft.partNumber.trim()}
+              >
+                {lookupLoading ? (
+                  <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true" />
+                ) : (
+                  <i className="bi bi-arrow-clockwise" />
+                )}
+                <span>Refresh</span>
+              </button>
+            </div>
           </div>
           {renderGroupedFields(draft, onDraftChange, onDraftPartBlur)}
           <button type="button" className="btn btn-primary btn-sm fw-semibold" onClick={onAddPart} disabled={lookupLoading}>
             <i className="bi bi-plus-lg me-1" />
             Add part details
           </button>
+          <div className="critical-part-bulk">
+            <label className="critical-part-field">
+              <span>Paste multiple part numbers</span>
+              <textarea
+                className="form-control form-control-sm"
+                rows="4"
+                value={bulkInput}
+                onChange={(event) => onBulkInputChange(event.target.value)}
+              />
+            </label>
+            <button type="button" className="btn btn-outline-primary btn-sm fw-semibold" onClick={onBulkAdd} disabled={lookupLoading || !bulkInput.trim()}>
+              <i className="bi bi-list-plus me-1" />
+              Add pasted parts
+            </button>
+          </div>
         </div>
       </div>
     </section>
@@ -2401,6 +2446,7 @@ function App() {
   const [reasonConfig, setReasonConfig] = useState(createReasonState)
   const [criticalParts, setCriticalParts] = useState([])
   const [criticalPartDraft, setCriticalPartDraft] = useState(() => createCriticalPartRow())
+  const [criticalPartBulkInput, setCriticalPartBulkInput] = useState('')
   const [criticalLookupLoading, setCriticalLookupLoading] = useState(false)
   const [showLanding, setShowLanding] = useState(getInitialLandingState)
   const [loading, setLoading] = useState(false)
@@ -2504,6 +2550,7 @@ function App() {
           setReasonConfig(workspace.reasonConfig ?? createReasonState())
           setCriticalParts(Array.isArray(workspace.criticalParts) ? workspace.criticalParts : [])
           setCriticalPartDraft(workspace.criticalPartDraft ?? createCriticalPartRow())
+          setCriticalPartBulkInput(workspace.criticalPartBulkInput ?? '')
         }
       })
       .catch(() => {
@@ -2546,6 +2593,7 @@ function App() {
         reasonConfig,
         criticalParts,
         criticalPartDraft,
+        criticalPartBulkInput,
         savedAt: new Date().toISOString(),
       }).catch(() => {
         pushToast('Workspace could not be saved in this browser.', 'warning')
@@ -2555,7 +2603,7 @@ function App() {
     return () => {
       window.clearTimeout(workspaceSaveTimerRef.current)
     }
-  }, [lineType, reportFiles, reportUploadedAt, modStartSequence, sevenDaysReportFile, engineStatusFile, axleStatusFile, frameStatusFile, capacity, startDate, scheduleSettings, holidayInput, holidays, shortages, analyses, activeReport, reasonConfig, criticalParts, criticalPartDraft])
+  }, [lineType, reportFiles, reportUploadedAt, modStartSequence, sevenDaysReportFile, engineStatusFile, axleStatusFile, frameStatusFile, capacity, startDate, scheduleSettings, holidayInput, holidays, shortages, analyses, activeReport, reasonConfig, criticalParts, criticalPartDraft, criticalPartBulkInput])
 
   function pushToast(message, type = 'danger') {
     toastCounterRef.current += 1
@@ -2713,6 +2761,7 @@ function App() {
     setReasonConfig(createReasonState())
     setCriticalParts([])
     setCriticalPartDraft(createCriticalPartRow())
+    setCriticalPartBulkInput('')
     setCriticalLookupLoading(false)
     setToasts([])
   }
@@ -2799,6 +2848,15 @@ function App() {
     setCriticalPartDraft((current) => ({ ...current, ...patch }))
   }
 
+  function parseCriticalPartNumbers(value) {
+    return [...new Set(
+      String(value ?? '')
+        .split(/[\s,;]+/)
+        .map(normalizeCriticalPartNumber)
+        .filter(Boolean),
+    )]
+  }
+
   function updateCriticalPart(id, patch) {
     setCriticalParts((current) => current.map((part) => (part.id === id ? { ...part, ...patch } : part)))
   }
@@ -2870,6 +2928,32 @@ function App() {
     }
     setCriticalParts((current) => [...current, nextPart])
     setCriticalPartDraft(createCriticalPartRow())
+  }
+
+  async function addBulkCriticalParts() {
+    const partNumbers = parseCriticalPartNumbers(criticalPartBulkInput)
+    if (!partNumbers.length) {
+      pushToast('Paste at least one part number before adding critical part details.', 'warning')
+      return
+    }
+    if (!sevenDaysReportFile) {
+      pushToast('Upload the 7 days report before adding pasted part details.', 'warning')
+      return
+    }
+
+    const addedParts = []
+    for (const partNumber of partNumbers) {
+      const details = await lookupCriticalPartDetails(partNumber, { silent: true })
+      addedParts.push({
+        ...createCriticalPartRow(),
+        ...(details ?? {}),
+        partNumber: details?.partNumber || partNumber,
+      })
+    }
+
+    setCriticalParts((current) => [...current, ...addedParts])
+    setCriticalPartBulkInput('')
+    pushToast(`Added ${addedParts.length} pasted part${addedParts.length === 1 ? '' : 's'}.`, 'success')
   }
 
   async function saveConstraintsBackup() {
@@ -3537,7 +3621,11 @@ function App() {
                 sevenDaysReportFile={sevenDaysReportFile}
                 onDraftChange={updateCriticalPartDraft}
                 onDraftPartBlur={fillCriticalPartDraftFromReport}
+                onDraftRefresh={fillCriticalPartDraftFromReport}
                 onAddPart={addCriticalPart}
+                bulkInput={criticalPartBulkInput}
+                onBulkInputChange={setCriticalPartBulkInput}
+                onBulkAdd={addBulkCriticalParts}
                 onPartChange={updateCriticalPart}
                 onRemovePart={removeCriticalPart}
               />
@@ -3764,7 +3852,10 @@ function App() {
                           <tr key={`preview-${rowIndex}-${row['Serial Number'] || row.Serial || rowIndex}`} className={getPreviewRowClass(shortageCount)}>
                             {previewColumns.map((column) => {
                               const value = row[column] ?? ''
-                              const className = getTableCellClass(column, value, shortageCount)
+                              const className = [
+                                getTableCellClass(column, value, shortageCount),
+                                isBackToBackHwcCell(deferredPreviewRows, rowIndex, column, lineType) ? 'cell-hwc-back-to-back' : '',
+                              ].filter(Boolean).join(' ')
                               return (
                                 <td key={`${column}-${rowIndex}`} className={className}>
                                   {String(value)}

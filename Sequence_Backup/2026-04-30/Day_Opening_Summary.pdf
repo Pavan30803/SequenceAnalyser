@@ -1,0 +1,153 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [5 0 R 7 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Length 1557 >>
+stream
+BT
+/F1 10 Tf
+50 790 Td
+14 TL
+(Day Opening Constraint Backup) Tj
+T*
+(Generated: 2026-04-30 15:28:22) Tj
+T*
+() Tj
+T*
+(Opening Summary) Tj
+T*
+(---------------) Tj
+T*
+(Line type: HDT) Tj
+T*
+(Mapped report rows: 1287) Tj
+T*
+(Hold orders: 4) Tj
+T*
+(Skip vehicles: 0) Tj
+T*
+() Tj
+T*
+(Charts) Tj
+T*
+(------) Tj
+T*
+(Hold by model: 1624 = 1) Tj
+T*
+(Hold by model: 1924 = 3) Tj
+T*
+(Skip by model: No data) Tj
+T*
+(Hold by type: Bus = 4) Tj
+T*
+(Hold by type: Truck = 0) Tj
+T*
+(Skip by type: Bus = 0) Tj
+T*
+(Skip by type: Truck = 0) Tj
+T*
+(Hold by work content: HWC = 4) Tj
+T*
+(Hold by work content: LWC = 0) Tj
+T*
+(Skip by work content: HWC = 0) Tj
+T*
+(Skip by work content: LWC = 0) Tj
+T*
+(Hold by region: Domestic = 4) Tj
+T*
+(Hold by region: Export = 0) Tj
+T*
+(Skip by region: Domestic = 0) Tj
+T*
+(Skip by region: Export = 0) Tj
+T*
+() Tj
+T*
+(Engine / Transmission / Axle / Frame Coverage) Tj
+T*
+(---------------------------------------------) Tj
+T*
+(Production date: 2026-04-30) Tj
+T*
+(Vehicles in sequence: 101) Tj
+T*
+(A shift: 48 Vehicles in sequence) Tj
+T*
+(Engine: No data) Tj
+T*
+(Transmission: No data) Tj
+T*
+(Axle: No data) Tj
+T*
+(Frame: No data) Tj
+T*
+(B shift: 53 Vehicles in sequence) Tj
+T*
+(Engine: No data) Tj
+T*
+(Transmission: No data) Tj
+T*
+(Axle: No data) Tj
+T*
+(Frame: No data) Tj
+T*
+() Tj
+T*
+(Shortage Impact Analysis) Tj
+T*
+(------------------------) Tj
+T*
+(A4003220479 A part: First shortage 2026-05-04 at 9:09 PM; sequence 76, 101; models 3532CM) Tj
+T*
+(2026-05-04: Day plan 5, Shortage qty 2) Tj
+T*
+(2026-05-05: Day plan 1, Shortage qty 1) Tj
+T*
+ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 4 0 R >>
+endobj
+6 0 obj
+<< /Length 134 >>
+stream
+BT
+/F1 10 Tf
+50 790 Td
+14 TL
+(2026-05-06: Day plan 0, Shortage qty 0) Tj
+T*
+(2026-05-07: Day plan 0, Shortage qty 0) Tj
+T*
+() Tj
+T*
+ET
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 842] /Resources << /Font << /F1 3 0 R >> >> /Contents 6 0 R >>
+endobj
+xref
+0 8
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000121 00000 n 
+0000000191 00000 n 
+0000001800 00000 n 
+0000001926 00000 n 
+0000002111 00000 n 
+trailer
+<< /Size 8 /Root 1 0 R >>
+startxref
+2237
+%%EOF

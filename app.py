@@ -305,6 +305,11 @@ def normalize_text_value(value):
     return str(value).strip()
 
 
+def normalize_detail_value(value):
+    normalized = normalize_text_value(value)
+    return normalized if normalized else 'NA'
+
+
 def normalize_requirement_qty(value):
     if pd.isna(value):
         return ''
@@ -339,6 +344,8 @@ def build_requirement_coverage_from_sheet(row):
         ('N', 29, 30),
         ('N+1', 33, 34),
         ('N+2', 37, 38),
+        ('N+3', 41, 42),
+        ('N+4', 45, 46),
     ]
     coverage = []
     for day_label, a_index, b_index in coverage_config:
@@ -370,6 +377,8 @@ def build_requirement_coverage_from_values(row_values):
         ('N', 29, 30),
         ('N+1', 33, 34),
         ('N+2', 37, 38),
+        ('N+3', 41, 42),
+        ('N+4', 45, 46),
     ]
     coverage = []
     for day_label, a_index, b_index in coverage_config:
@@ -406,10 +415,12 @@ def parse_critical_part_details_from_table(file_bytes, part_number):
             continue
         return {
             'partNumber': current_part,
-            'partDescription': normalize_text_value(row_values[1]),
-            'vendorName': normalize_text_value(row_values[4]),
-            'l4Name': normalize_text_value(row_values[6]),
-            'pmcName': normalize_text_value(row_values[7]),
+            'partDescription': normalize_detail_value(row_values[1]),
+            'vendorName': normalize_detail_value(row_values[4]),
+            'supplierBacklog': normalize_detail_value(row_values[23] if len(row_values) > 23 else ''),
+            'l4Name': normalize_detail_value(row_values[6]),
+            'pmcName': normalize_detail_value(row_values[7]),
+            'smName': normalize_detail_value(row_values[8] if len(row_values) > 8 else ''),
             'requirementCoverage': build_requirement_coverage_from_values(row_values),
         }
     return None
@@ -434,10 +445,12 @@ def parse_critical_part_details(file_bytes, part_number):
             continue
         return {
             'partNumber': current_part,
-            'partDescription': normalize_text_value(row[1].value),
-            'vendorName': normalize_text_value(row[4].value),
-            'l4Name': normalize_text_value(row[6].value),
-            'pmcName': normalize_text_value(row[7].value),
+            'partDescription': normalize_detail_value(row[1].value),
+            'vendorName': normalize_detail_value(row[4].value),
+            'supplierBacklog': normalize_detail_value(row[23].value if len(row) > 23 else ''),
+            'l4Name': normalize_detail_value(row[6].value),
+            'pmcName': normalize_detail_value(row[7].value),
+            'smName': normalize_detail_value(row[8].value if len(row) > 8 else ''),
             'requirementCoverage': build_requirement_coverage_from_sheet(row),
         }
 
