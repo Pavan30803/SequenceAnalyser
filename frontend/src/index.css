@@ -1,11 +1,10 @@
 :root {
-  font-family: 'Bahnschrift', 'Segoe UI Variable', 'Trebuchet MS', sans-serif;
+  font-family: 'Segoe UI Variable', 'Segoe UI', Arial, sans-serif;
   line-height: 1.5;
   font-weight: 400;
-  color: #17304d;
+  color: #1f3349;
   background:
-    radial-gradient(circle at top, rgba(255, 196, 69, 0.15), transparent 25%),
-    linear-gradient(180deg, #eef4f8 0%, #f8fbfd 35%, #f3f7fb 100%);
+    linear-gradient(180deg, #eef4f8 0%, #fbfdff 38%, #f4f7fa 100%);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -26,6 +25,10 @@ body {
   margin: 0;
 }
 
+body {
+  font-size: 15px;
+}
+
 button,
 input,
 select,
@@ -38,12 +41,28 @@ code {
 }
 
 .btn-primary {
-  background-color: #12345b;
-  border-color: #12345b;
+  background-color: #17436f;
+  border-color: #17436f;
 }
 
 .btn-primary:hover,
 .btn-primary:focus {
-  background-color: #1b4a7d;
-  border-color: #1b4a7d;
+  background-color: #225b92;
+  border-color: #225b92;
+}
+
+.btn {
+  border-radius: 0.45rem;
+}
+
+.form-control,
+.form-select,
+.input-group-text {
+  border-color: #cfdbe8;
+}
+
+.form-control:focus,
+.form-select:focus {
+  border-color: #3c91e6;
+  box-shadow: 0 0 0 0.18rem rgba(60, 145, 230, 0.16);
 }

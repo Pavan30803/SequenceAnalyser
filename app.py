@@ -2,15 +2,21 @@ from pathlib import Path
 
 from flask import Flask, request, jsonify, send_file
 import pandas as pd
+import base64
 import io
 import json
 import re
+import zipfile
 from datetime import datetime
 from openpyxl import load_workbook
 from openpyxl.styles.colors import COLOR_INDEX
 from werkzeug.utils import secure_filename
+from PIL import Image, ImageDraw, ImageFont
 
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 512 * 1024 * 1024
+app.config['MAX_FORM_MEMORY_SIZE'] = 128 * 1024 * 1024
+app.config['MAX_FORM_PARTS'] = 5000
 BASE_DIR = Path(__file__).resolve().parent
 FRONTEND_DIST_DIR = BASE_DIR / 'frontend' / 'dist'
 BACKUP_DIR = BASE_DIR / 'Sequence_Backup'
@@ -60,6 +66,50 @@ def parse_json_field(name, fallback):
         return json.loads(raw_value)
     except json.JSONDecodeError:
         return fallback
+
+
+def read_json_file(path, fallback):
+    if not path.exists():
+        return fallback
+    try:
+        return json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, json.JSONDecodeError):
+        return fallback
+
+
+def get_backup_folders():
+    if not BACKUP_DIR.exists():
+        return []
+
+    folders = []
+    for folder in BACKUP_DIR.iterdir():
+        if folder.is_dir() and ((folder / 'Mapped_Day_Opening_Report.csv').exists() or (folder / 'Mapped_Day_Opening_Report.xlsx').exists()):
+            folders.append(folder)
+    return sorted(folders, key=lambda item: item.stat().st_mtime, reverse=True)
+
+
+def describe_backup_folder(folder):
+    source_folder = folder / 'source_files'
+    mapped_csv = folder / 'Mapped_Day_Opening_Report.csv'
+    mapped_excel = folder / 'Mapped_Day_Opening_Report.xlsx'
+    session_state = read_json_file(folder / 'Planner_Session.json', {})
+
+    files = []
+    for path in sorted(folder.rglob('*')):
+        if path.is_file():
+            files.append(str(path.relative_to(folder)).replace('\\', '/'))
+
+    return {
+        'id': folder.name,
+        'folder': str(folder),
+        'updated_at': datetime.fromtimestamp(folder.stat().st_mtime).isoformat(),
+        'line_type': session_state.get('lineType', 'HDT'),
+        'has_session_state': bool(session_state),
+        'has_mapped_csv': mapped_csv.exists(),
+        'has_mapped_excel': mapped_excel.exists(),
+        'source_file_count': len([path for path in source_folder.iterdir() if path.is_file()]) if source_folder.exists() else 0,
+        'files': files,
+    }
 
 
 def pdf_escape(value):
@@ -141,7 +191,83 @@ def flatten_count_dict(title, values):
     return [f"{title}: {key} = {value}" for key, value in sorted(values.items())]
 
 
-def build_backup_pdf_bytes(line_type, summary, status_summary, inference_cards, mapped_row_count):
+def load_backup_font(size, bold=False):
+    candidates = [
+        "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf",
+        "C:/Windows/Fonts/segoeuib.ttf" if bold else "C:/Windows/Fonts/segoeui.ttf",
+    ]
+    for candidate in candidates:
+        try:
+            return ImageFont.truetype(candidate, size=size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def parse_chart_images(chart_images):
+    parsed = []
+    for item in chart_images if isinstance(chart_images, list) else []:
+        if not isinstance(item, dict):
+            continue
+        image_data = str(item.get('image', ''))
+        if ',' in image_data:
+            header, image_data = image_data.split(',', 1)
+        else:
+            header = ''
+        try:
+            raw_bytes = base64.b64decode(image_data)
+            image = Image.open(io.BytesIO(raw_bytes)).convert('RGB')
+        except Exception:
+            continue
+        extension = 'jpg' if 'jpeg' in header.lower() or 'jpg' in header.lower() else 'png'
+        parsed.append({
+            'title': str(item.get('title') or 'Chart'),
+            'image': image,
+            'bytes': raw_bytes,
+            'extension': extension,
+        })
+    return parsed
+
+
+def draw_wrapped_text(draw, text, xy, font, fill=(25, 46, 74), max_width=1100, line_gap=8):
+    x, y = xy
+    words = str(text).split()
+    if not words:
+        return y + font.size + line_gap
+
+    line = ''
+    for word in words:
+        candidate = f"{line} {word}".strip()
+        bbox = draw.textbbox((x, y), candidate, font=font)
+        if bbox[2] - bbox[0] > max_width and line:
+            draw.text((x, y), line, font=font, fill=fill)
+            y += font.size + line_gap
+            line = word
+        else:
+            line = candidate
+    draw.text((x, y), line, font=font, fill=fill)
+    return y + font.size + line_gap
+
+
+def make_backup_page(title=None):
+    page = Image.new('RGB', (1240, 1754), 'white')
+    draw = ImageDraw.Draw(page)
+    if title:
+        draw.text((70, 60), title, font=load_backup_font(34, True), fill=(0, 48, 98))
+        draw.line((70, 112, 1170, 112), fill=(204, 218, 235), width=3)
+    return page, draw
+
+
+def paste_fit(page, image, box):
+    x, y, width, height = box
+    source = image.copy()
+    source.thumbnail((width, height), Image.LANCZOS)
+    paste_x = x + max((width - source.width) // 2, 0)
+    paste_y = y + max((height - source.height) // 2, 0)
+    page.paste(source, (paste_x, paste_y))
+
+
+def build_backup_text_sections(line_type, summary, status_summary, inference_cards, mapped_row_count):
     sections = []
     sections.append((
         "Opening Summary",
@@ -185,7 +311,10 @@ def build_backup_pdf_bytes(line_type, summary, status_summary, inference_cards, 
             shortage_lines.append(f"{label}: Covered")
         else:
             shortage_lines.append(
-                f"{label}: First shortage {card.get('shortageDate', '')} at {card.get('impactTime', '')}; "
+                f"{label}: First shortage {card.get('shortageDate', '')}; "
+                f"scheduled impact {card.get('scheduledImpactTime', card.get('impactTime', ''))}; "
+                f"point-of-fit impact {card.get('pointOfFitImpactTime', 'N/A')} "
+                f"at station {card.get('pointOfFitStation', 'N/A') or 'N/A'}; "
                 f"sequence {card.get('firstDaySequences', '')}; models {card.get('connectingModels', '')}"
             )
             for entry in card.get('forecast', []) or []:
@@ -194,7 +323,145 @@ def build_backup_pdf_bytes(line_type, summary, status_summary, inference_cards, 
                 )
     sections.append(("Shortage Impact Analysis", shortage_lines or ["No shortage impact cards available"]))
 
-    return create_text_pdf("Day Opening Constraint Backup", sections)
+    return sections
+
+
+def group_chart_images(parsed_images):
+    hold_images = [item for item in parsed_images if str(item.get('title', '')).lower().startswith('stratification: hold') or str(item.get('title', '')).lower().startswith('hold:')]
+    skip_images = [item for item in parsed_images if str(item.get('title', '')).lower().startswith('stratification: skip') or str(item.get('title', '')).lower().startswith('skip:')]
+    other_images = [item for item in parsed_images if item not in hold_images and item not in skip_images]
+    return [
+        ("Hold PI Chart & Further Stratifications", hold_images),
+        ("Skip PI Chart & Further Stratifications", skip_images),
+        ("Additional Stratifications", other_images),
+    ]
+
+
+def add_chart_group_page(pages, title, chart_group):
+    if not chart_group:
+        return
+    page, draw = make_backup_page(title)
+    title_font = load_backup_font(22, True)
+    for index, item in enumerate(chart_group[:4]):
+        if index == 0:
+            box = (80, 165, 1080, 760)
+            label_xy = (90, 135)
+        else:
+            column_width = 340
+            x = 80 + (index - 1) * 370
+            box = (x, 1045, column_width, 430)
+            label_xy = (x, 1010)
+        draw.text(label_xy, item['title'], font=title_font, fill=(0, 48, 98))
+        paste_fit(page, item['image'], box)
+    pages.append(page)
+
+
+def build_backup_pdf_bytes(line_type, summary, status_summary, inference_cards, mapped_row_count, chart_images=None):
+    sections = build_backup_text_sections(line_type, summary, status_summary, inference_cards, mapped_row_count)
+    parsed_images = parse_chart_images(chart_images)
+    if not parsed_images:
+        return create_text_pdf("Day Opening Constraint Backup", sections)
+
+    pages = []
+    page, draw = make_backup_page("Day Opening Constraint Backup")
+    normal_font = load_backup_font(20)
+    section_font = load_backup_font(24, True)
+    y = 135
+    for section_title, lines in sections:
+        if y > 1500:
+            pages.append(page)
+            page, draw = make_backup_page()
+            y = 70
+        draw.text((70, y), section_title, font=section_font, fill=(0, 48, 98))
+        y += 42
+        for line in lines[:18]:
+            y = draw_wrapped_text(draw, line, (90, y), normal_font, max_width=1060)
+            if y > 1540:
+                pages.append(page)
+                page, draw = make_backup_page()
+                y = 70
+        y += 20
+    pages.append(page)
+
+    for title, group in group_chart_images(parsed_images):
+        add_chart_group_page(pages, title, group)
+
+    output = io.BytesIO()
+    pages[0].save(output, format='PDF', save_all=True, append_images=pages[1:])
+    return output.getvalue()
+
+
+def xml_escape(value):
+    return str(value).replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;').replace('"', '&quot;')
+
+
+def build_backup_pptx_bytes(line_type, summary, status_summary, inference_cards, mapped_row_count, chart_images=None):
+    parsed_images = parse_chart_images(chart_images)
+    sections = build_backup_text_sections(line_type, summary, status_summary, inference_cards, mapped_row_count)
+    slide_titles = ["Day Opening Constraint Backup"]
+    slide_payloads = [{"type": "text", "sections": sections[:2]}]
+    for title, group in group_chart_images(parsed_images):
+        if group:
+            slide_titles.append(title)
+            slide_payloads.append({"type": "charts", "charts": group[:4]})
+    slide_titles.append("Shortage Impact Analysis")
+    slide_payloads.append({"type": "text", "sections": [sections[-1]]})
+
+    media_items = []
+    slide_xml = []
+    slide_rels = []
+    for slide_index, (title, payload) in enumerate(zip(slide_titles, slide_payloads), start=1):
+        shapes = [
+            f'<p:sp><p:nvSpPr><p:cNvPr id="2" name="Title"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="420000" y="260000"/><a:ext cx="11300000" cy="520000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US" sz="3000" b="1"/><a:t>{xml_escape(title)}</a:t></a:r></a:p></p:txBody></p:sp>'
+        ]
+        rels = []
+        if payload["type"] == "charts":
+            boxes = [
+                (450000, 930000, 5300000, 3900000),
+                (6050000, 930000, 2600000, 1950000),
+                (8850000, 930000, 2600000, 1950000),
+                (6050000, 3230000, 5400000, 2400000),
+            ]
+            for chart_index, chart in enumerate(payload["charts"], start=1):
+                media_name = f"image{len(media_items) + 1}.{chart.get('extension', 'png')}"
+                media_items.append((media_name, chart["bytes"]))
+                rel_id = f"rId{chart_index}"
+                rels.append((rel_id, f"../media/{media_name}"))
+                x, y, cx, cy = boxes[chart_index - 1]
+                shapes.append(
+                    f'<p:pic><p:nvPicPr><p:cNvPr id="{chart_index + 2}" name="{xml_escape(chart["title"])}"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr><p:blipFill><a:blip r:embed="{rel_id}"/><a:stretch><a:fillRect/></a:stretch></p:blipFill><p:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{cx}" cy="{cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>'
+                )
+        else:
+            y = 980000
+            body_lines = []
+            for section_title, lines in payload["sections"]:
+                body_lines.append(section_title)
+                body_lines.extend(lines[:10])
+            for line in body_lines[:22]:
+                shapes.append(
+                    f'<p:sp><p:nvSpPr><p:cNvPr id="{len(shapes) + 2}" name="Text"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="620000" y="{y}"/><a:ext cx="10800000" cy="270000"/></a:xfrm></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US" sz="1400"/><a:t>{xml_escape(line)}</a:t></a:r></a:p></p:txBody></p:sp>'
+                )
+                y += 260000
+
+        slide_xml.append(f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:cSld><p:spTree><p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>{"".join(shapes)}</p:spTree></p:cSld></p:sld>')
+        slide_rels.append(rels)
+
+    output = io.BytesIO()
+    with zipfile.ZipFile(output, 'w', zipfile.ZIP_DEFLATED) as archive:
+        overrides = ''.join(f'<Override PartName="/ppt/slides/slide{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>' for i in range(1, len(slide_xml) + 1))
+        archive.writestr('[Content_Types].xml', f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="png" ContentType="image/png"/><Default Extension="jpg" ContentType="image/jpeg"/><Default Extension="jpeg" ContentType="image/jpeg"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>{overrides}</Types>')
+        archive.writestr('_rels/.rels', '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="ppt/presentation.xml"/></Relationships>')
+        presentation_rels = ''.join(f'<Relationship Id="rId{i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide{i}.xml"/>' for i in range(1, len(slide_xml) + 1))
+        slide_ids = ''.join(f'<p:sldId id="{255 + i}" r:id="rId{i}"/>' for i in range(1, len(slide_xml) + 1))
+        archive.writestr('ppt/presentation.xml', f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"><p:sldSz cx="12192000" cy="6858000" type="wide"/><p:sldIdLst>{slide_ids}</p:sldIdLst></p:presentation>')
+        archive.writestr('ppt/_rels/presentation.xml.rels', f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{presentation_rels}</Relationships>')
+        for index, xml in enumerate(slide_xml, start=1):
+            archive.writestr(f'ppt/slides/slide{index}.xml', xml)
+            rel_xml = ''.join(f'<Relationship Id="{rel_id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{target}"/>' for rel_id, target in slide_rels[index - 1])
+            archive.writestr(f'ppt/slides/_rels/slide{index}.xml.rels', f'<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{rel_xml}</Relationships>')
+        for media_name, image_bytes in media_items:
+            archive.writestr(f'ppt/media/{media_name}', image_bytes)
+    return output.getvalue()
 
 
 def save_uploaded_file(file_storage, target_dir, prefix):
@@ -403,58 +670,143 @@ def build_requirement_coverage_from_values(row_values):
     return coverage
 
 
-def parse_critical_part_details_from_table(file_bytes, part_number):
+def build_critical_part_detail_from_values(row_values, current_part):
+    return {
+        'partNumber': current_part,
+        'partDescription': normalize_detail_value(row_values[1]),
+        'vendorName': normalize_detail_value(row_values[4]),
+        'supplierBacklog': normalize_detail_value(row_values[23] if len(row_values) > 23 else ''),
+        'l4Name': normalize_detail_value(row_values[6]),
+        'pmcName': normalize_detail_value(row_values[7]),
+        'smName': normalize_detail_value(row_values[8] if len(row_values) > 8 else ''),
+        'requirementCoverage': build_requirement_coverage_from_values(row_values),
+    }
+
+
+def build_critical_part_detail_from_sheet(row, current_part):
+    return {
+        'partNumber': current_part,
+        'partDescription': normalize_detail_value(row[1].value),
+        'vendorName': normalize_detail_value(row[4].value),
+        'supplierBacklog': normalize_detail_value(row[23].value if len(row) > 23 else ''),
+        'l4Name': normalize_detail_value(row[6].value),
+        'pmcName': normalize_detail_value(row[7].value),
+        'smName': normalize_detail_value(row[8].value if len(row) > 8 else ''),
+        'requirementCoverage': build_requirement_coverage_from_sheet(row),
+    }
+
+
+def parse_critical_parts_details_from_table(file_bytes, part_numbers):
     df = parse_excel(file_bytes)
-    target_part = normalize_part_number_value(part_number).upper()
+    target_parts = {normalize_part_number_value(part).upper() for part in part_numbers if normalize_part_number_value(part)}
+    details_by_part = {}
     for _, row in df.iterrows():
         row_values = list(row)
         if len(row_values) < 8:
             continue
         current_part = normalize_part_number_value(row_values[0])
-        if current_part.upper() != target_part:
+        current_key = current_part.upper()
+        if current_key not in target_parts or current_key in details_by_part:
             continue
-        return {
-            'partNumber': current_part,
-            'partDescription': normalize_detail_value(row_values[1]),
-            'vendorName': normalize_detail_value(row_values[4]),
-            'supplierBacklog': normalize_detail_value(row_values[23] if len(row_values) > 23 else ''),
-            'l4Name': normalize_detail_value(row_values[6]),
-            'pmcName': normalize_detail_value(row_values[7]),
-            'smName': normalize_detail_value(row_values[8] if len(row_values) > 8 else ''),
-            'requirementCoverage': build_requirement_coverage_from_values(row_values),
-        }
-    return None
+        details_by_part[current_key] = build_critical_part_detail_from_values(row_values, current_part)
+        if len(details_by_part) == len(target_parts):
+            break
+    return details_by_part
 
 
-def parse_critical_part_details(file_bytes, part_number):
-    target_part = normalize_part_number_value(part_number).upper()
-    if not target_part:
-        return None
+def parse_critical_parts_details(file_bytes, part_numbers):
+    target_parts = {normalize_part_number_value(part).upper() for part in part_numbers if normalize_part_number_value(part)}
+    if not target_parts:
+        return {}
 
     try:
         workbook = load_workbook(io.BytesIO(file_bytes), data_only=True)
     except Exception:
-        return parse_critical_part_details_from_table(file_bytes, part_number)
+        return parse_critical_parts_details_from_table(file_bytes, part_numbers)
 
     sheet = workbook.active
+    details_by_part = {}
     for row in sheet.iter_rows(min_row=2):
         if len(row) < 8:
             continue
         current_part = normalize_part_number_value(row[0].value)
-        if current_part.upper() != target_part:
+        current_key = current_part.upper()
+        if current_key not in target_parts or current_key in details_by_part:
             continue
-        return {
-            'partNumber': current_part,
-            'partDescription': normalize_detail_value(row[1].value),
-            'vendorName': normalize_detail_value(row[4].value),
-            'supplierBacklog': normalize_detail_value(row[23].value if len(row) > 23 else ''),
-            'l4Name': normalize_detail_value(row[6].value),
-            'pmcName': normalize_detail_value(row[7].value),
-            'smName': normalize_detail_value(row[8].value if len(row) > 8 else ''),
-            'requirementCoverage': build_requirement_coverage_from_sheet(row),
-        }
+        details_by_part[current_key] = build_critical_part_detail_from_sheet(row, current_part)
+        if len(details_by_part) == len(target_parts):
+            break
 
-    return None
+    return details_by_part
+
+
+def parse_critical_part_details(file_bytes, part_number):
+    return parse_critical_parts_details(file_bytes, [part_number]).get(normalize_part_number_value(part_number).upper())
+
+
+def build_l4_directory_entry(l4_value, pmc_value, sm_value):
+    l4_name = normalize_detail_value(l4_value)
+    if l4_name == 'NA':
+        return None
+    return {
+        'l4Name': l4_name,
+        'pmcName': normalize_detail_value(pmc_value),
+        'smName': normalize_detail_value(sm_value),
+    }
+
+
+def parse_l4_directory_from_table(file_bytes):
+    df = parse_excel(file_bytes)
+    directory = {}
+    for _, row in df.iterrows():
+        row_values = list(row)
+        if len(row_values) < 9:
+            continue
+        entry = build_l4_directory_entry(row_values[6], row_values[7], row_values[8])
+        if not entry:
+            continue
+        group = directory.setdefault(entry['l4Name'], {'l4Name': entry['l4Name'], 'pmcNames': set(), 'smNames': set()})
+        if entry['pmcName'] != 'NA':
+            group['pmcNames'].add(entry['pmcName'])
+        if entry['smName'] != 'NA':
+            group['smNames'].add(entry['smName'])
+    return [
+        {
+            'l4Name': group['l4Name'],
+            'pmcNames': sorted(group['pmcNames']),
+            'smNames': sorted(group['smNames']),
+        }
+        for group in sorted(directory.values(), key=lambda item: item['l4Name'])
+    ]
+
+
+def parse_l4_directory(file_bytes):
+    try:
+        workbook = load_workbook(io.BytesIO(file_bytes), data_only=True)
+    except Exception:
+        return parse_l4_directory_from_table(file_bytes)
+
+    sheet = workbook.active
+    directory = {}
+    for row in sheet.iter_rows(min_row=2):
+        if len(row) < 9:
+            continue
+        entry = build_l4_directory_entry(row[6].value, row[7].value, row[8].value)
+        if not entry:
+            continue
+        group = directory.setdefault(entry['l4Name'], {'l4Name': entry['l4Name'], 'pmcNames': set(), 'smNames': set()})
+        if entry['pmcName'] != 'NA':
+            group['pmcNames'].add(entry['pmcName'])
+        if entry['smName'] != 'NA':
+            group['smNames'].add(entry['smName'])
+    return [
+        {
+            'l4Name': group['l4Name'],
+            'pmcNames': sorted(group['pmcNames']),
+            'smNames': sorted(group['smNames']),
+        }
+        for group in sorted(directory.values(), key=lambda item: item['l4Name'])
+    ]
 
 
 def analyze_sequence(df, shortages, engine_transmission_statuses=None, axle_statuses=None, frame_statuses=None, opening_hold_keys=None, line_type='HDT'):
@@ -595,6 +947,13 @@ def analyze_sequence(df, shortages, engine_transmission_statuses=None, axle_stat
             return 'Domestic'
         return 'Export'
 
+    def get_pie_model_label(record):
+        model = record.get('model', 'Unknown')
+        if is_bus_variant(record.get('variant', '')):
+            region = str(record.get('region', 'Export')).strip()
+            return f"{model} (BUS)" if region == 'Domestic' else f"{model} (Exp BUS)"
+        return model
+
     def get_engine_status_fallback(variant_val):
         variant_str = str(variant_val).strip().upper()
         if len(variant_str) >= 11 and variant_str[10] in ['U', 'T']:
@@ -675,14 +1034,19 @@ def analyze_sequence(df, shortages, engine_transmission_statuses=None, axle_stat
     # =========================================================
     # FRAME STATUS MAPPING
     # =========================================================
-    if frame_statuses and line_type == 'HDT':
+    if frame_statuses:
         frame_values = []
         for _, row in original_df.iterrows():
             dsn_key = normalize_order_key(row.get(dsn_col, '')) if dsn_col else ''
             frame_values.append(frame_statuses.get(dsn_key, ''))
 
         frame_insert_idx = len(original_df.columns)
-        if 'Axle status' in original_df.columns:
+        country_col = next((c for c in original_df.columns if str(c).strip().upper() == 'COUNTRY'), None)
+        if country_col:
+            frame_insert_idx = list(original_df.columns).index(country_col)
+        elif 'Region' in original_df.columns:
+            frame_insert_idx = list(original_df.columns).index('Region')
+        elif 'Axle status' in original_df.columns:
             frame_insert_idx = list(original_df.columns).index('Axle status') + 1
 
         original_df.insert(frame_insert_idx, 'Frame status', frame_values)
@@ -851,9 +1215,6 @@ def analyze_sequence(df, shortages, engine_transmission_statuses=None, axle_stat
     hold_region_strat = {'Domestic': 0, 'Export': 0}
     
     for r in hold_records:
-        model = r.get('model', 'Unknown')
-        hold_strat[model] = hold_strat.get(model, 0) + 1
-        
         var_str = r.get('variant', '').strip().upper()
         if var_str.startswith(('V83', 'F83', 'M83', 'L83')):
             hold_type_strat['Bus'] += 1
@@ -868,6 +1229,8 @@ def analyze_sequence(df, shortages, engine_transmission_statuses=None, axle_stat
         
         reg = r.get('region', 'Export')
         hold_region_strat[reg] = hold_region_strat.get(reg, 0) + 1
+        model = get_pie_model_label(r)
+        hold_strat[model] = hold_strat.get(model, 0) + 1
         
     skip_strat = {}
     skip_type_strat = {'Bus': 0, 'Truck': 0}
@@ -875,9 +1238,6 @@ def analyze_sequence(df, shortages, engine_transmission_statuses=None, axle_stat
     skip_region_strat = {'Domestic': 0, 'Export': 0}
     
     for r in skip_records:
-        model = r.get('model', 'Unknown')
-        skip_strat[model] = skip_strat.get(model, 0) + 1
-        
         var_str = r.get('variant', '').strip().upper()
         if var_str.startswith(('V83', 'F83', 'M83', 'L83')):
             skip_type_strat['Bus'] += 1
@@ -892,6 +1252,8 @@ def analyze_sequence(df, shortages, engine_transmission_statuses=None, axle_stat
         
         reg = r.get('region', 'Export')
         skip_region_strat[reg] = skip_region_strat.get(reg, 0) + 1
+        model = get_pie_model_label(r)
+        skip_strat[model] = skip_strat.get(model, 0) + 1
 
     # =========================================================
     # 4. PREPARE FINAL JSON RESPONSE
@@ -1027,14 +1389,23 @@ def analyze():
 def critical_part_details():
     report_file = request.files.get('seven_days_report_file')
     part_number = request.form.get('part_number', '')
+    part_numbers = parse_json_field('part_numbers', None)
 
-    if not part_number.strip():
+    requested_parts = part_numbers if isinstance(part_numbers, list) else [part_number]
+    requested_parts = [normalize_part_number_value(part) for part in requested_parts if normalize_part_number_value(part)]
+    if not requested_parts:
         return jsonify({'error': 'Enter a part number.'}), 400
     if not report_file or not report_file.filename:
         return jsonify({'error': 'Upload the 7 days report before looking up part details.'}), 400
 
     try:
-        details = parse_critical_part_details(report_file.read(), part_number)
+        details_by_part = parse_critical_parts_details(report_file.read(), requested_parts)
+        if isinstance(part_numbers, list):
+            return jsonify({
+                'parts': [details_by_part.get(normalize_part_number_value(part).upper()) for part in requested_parts],
+                'missing': [part for part in requested_parts if normalize_part_number_value(part).upper() not in details_by_part],
+            })
+        details = details_by_part.get(normalize_part_number_value(requested_parts[0]).upper())
         if not details:
             return jsonify({'error': 'Part number was not found in the 7 days report.'}), 404
         return jsonify(details)
@@ -1043,12 +1414,67 @@ def critical_part_details():
         return jsonify({'error': f"Critical part lookup failed: {str(e)}"}), 500
 
 
+@app.route('/api/l4-directory', methods=['POST'])
+def l4_directory():
+    report_file = request.files.get('seven_days_report_file')
+    if not report_file or not report_file.filename:
+        return jsonify({'error': 'Upload the 7 days report before loading L4 details.'}), 400
+
+    try:
+        return jsonify({'l4Directory': parse_l4_directory(report_file.read())})
+    except Exception as e:
+        print(f"L4 directory load failed: {str(e)}")
+        return jsonify({'error': f"L4 directory load failed: {str(e)}"}), 500
+
+
+@app.route('/api/constraint-backups', methods=['GET'])
+def constraint_backups():
+    backups = [describe_backup_folder(folder) for folder in get_backup_folders()]
+    return jsonify({'backups': backups})
+
+
+@app.route('/api/constraint-backups/<backup_id>', methods=['GET'])
+def constraint_backup_detail(backup_id):
+    safe_backup_id = sanitize_backup_name(backup_id, '')
+    backup_folder = (BACKUP_DIR / safe_backup_id).resolve()
+
+    if not safe_backup_id or BACKUP_DIR.resolve() not in backup_folder.parents:
+        return jsonify({'error': 'Invalid backup folder.'}), 400
+    if not backup_folder.exists() or not backup_folder.is_dir():
+        return jsonify({'error': 'Backup folder was not found.'}), 404
+
+    mapped_csv = backup_folder / 'Mapped_Day_Opening_Report.csv'
+    mapped_excel = backup_folder / 'Mapped_Day_Opening_Report.xlsx'
+    if mapped_csv.exists():
+        mapped_df = pd.read_csv(mapped_csv)
+    elif mapped_excel.exists():
+        mapped_df = pd.read_excel(mapped_excel)
+    else:
+        return jsonify({'error': 'Mapped opening report is missing from this backup.'}), 404
+
+    mapped_df = mapped_df.fillna('')
+    mapped_columns = [str(column) for column in mapped_df.columns]
+    mapped_rows = mapped_df.to_dict(orient='records')
+
+    return jsonify({
+        'backup': describe_backup_folder(backup_folder),
+        'mapped_columns': mapped_columns,
+        'mapped_rows': mapped_rows,
+        'summary': read_json_file(backup_folder / 'Opening_Summary.json', {}),
+        'status_summary': read_json_file(backup_folder / 'Status_Summary.json', {}),
+        'inference_cards': read_json_file(backup_folder / 'Inference_Cards.json', []),
+        'workspace_state': read_json_file(backup_folder / 'Planner_Session.json', {}),
+    })
+
+
 @app.route('/api/save-constraints', methods=['POST'])
 def save_constraints():
     mapped_columns = parse_json_field('mapped_columns', [])
     summary = parse_json_field('summary', {})
     status_summary = parse_json_field('status_summary', {})
     inference_cards = parse_json_field('inference_cards', [])
+    chart_images = parse_json_field('chart_images', [])
+    workspace_state = parse_json_field('workspace_state', {})
     line_type = request.form.get('line_type', 'HDT')
     mapped_report_file = request.files.get('mapped_report_file')
 
@@ -1079,6 +1505,21 @@ def save_constraints():
             mapped_csv_path.name,
         ]
 
+        metadata_files = [
+            ('Opening_Summary.json', summary),
+            ('Status_Summary.json', status_summary),
+            ('Inference_Cards.json', inference_cards),
+            ('Planner_Session.json', {
+                **workspace_state,
+                'lineType': line_type,
+                'savedAt': datetime.now().isoformat(),
+            }),
+        ]
+        for file_name, payload in metadata_files:
+            metadata_path = backup_folder / file_name
+            metadata_path.write_text(json.dumps(payload, indent=2), encoding='utf-8')
+            saved_files.append(metadata_path.name)
+
         file_groups = [
             ('opening_report_file', 'opening_report'),
             ('mod_report_file', 'mod_report'),
@@ -1097,10 +1538,15 @@ def save_constraints():
             if saved_name:
                 saved_files.append(f"source_files/{saved_name}")
 
-        pdf_bytes = build_backup_pdf_bytes(line_type, summary, status_summary, inference_cards, len(mapped_df.index))
+        pdf_bytes = build_backup_pdf_bytes(line_type, summary, status_summary, inference_cards, len(mapped_df.index), chart_images)
         pdf_path = backup_folder / 'Day_Opening_Summary.pdf'
         pdf_path.write_bytes(pdf_bytes)
         saved_files.append(pdf_path.name)
+
+        pptx_bytes = build_backup_pptx_bytes(line_type, summary, status_summary, inference_cards, len(mapped_df.index), chart_images)
+        pptx_path = backup_folder / 'Day_Opening_Summary.pptx'
+        pptx_path.write_bytes(pptx_bytes)
+        saved_files.append(pptx_path.name)
 
         return jsonify({
             'message': 'Constraints backup saved successfully.',

@@ -1,0 +1,43 @@
+[
+  {
+    "part": "A4003220479",
+    "partName": "SWIVELLING LEVER FRT LH / FA1",
+    "pointOfFitStation": "100",
+    "covered": false,
+    "shortageDate": "2026-05-05",
+    "impactTime": "7:10 AM",
+    "scheduledImpactTime": "7:10 AM",
+    "pointOfFitImpactTime": "8:40 AM",
+    "connectingModels": "3532CM",
+    "firstDaySequenceNumbers": [
+      1,
+      21,
+      28,
+      69
+    ],
+    "firstDaySequences": "1, 21, 28, 69",
+    "forecast": [
+      {
+        "date": "2026-05-05",
+        "dayPlan": 4,
+        "shortageQty": 4
+      },
+      {
+        "date": "2026-05-06",
+        "dayPlan": 1,
+        "shortageQty": 1
+      },
+      {
+        "date": "2026-05-07",
+        "dayPlan": 0,
+        "shortageQty": 0
+      },
+      {
+        "date": "2026-05-08",
+        "dayPlan": 0,
+        "shortageQty": 0
+      }
+    ],
+    "unscheduled": false
+  }
+]

@@ -1,0 +1,44 @@
+{
+  "dsn_max": 78026,
+  "dsn_min": 77976,
+  "hold_region_stratification": {
+    "Domestic": 14,
+    "Export": 0
+  },
+  "hold_stratification": {
+    "1624  (BUS)": 7,
+    "1924  (BUS)": 1,
+    "2823R": 1,
+    "2826R": 2,
+    "3526R": 3
+  },
+  "hold_type_stratification": {
+    "Bus": 8,
+    "Truck": 6
+  },
+  "hold_wc_stratification": {
+    "HWC": 11,
+    "LWC": 3
+  },
+  "shortage_parts": [
+    "A4003220479"
+  ],
+  "skip_region_stratification": {
+    "Domestic": 1,
+    "Export": 0
+  },
+  "skip_stratification": {
+    "2826C": 1
+  },
+  "skip_type_stratification": {
+    "Bus": 0,
+    "Truck": 1
+  },
+  "skip_wc_stratification": {
+    "HWC": 0,
+    "LWC": 1
+  },
+  "total_hold": 14,
+  "total_in_file": 1217,
+  "total_skipped": 1
+}

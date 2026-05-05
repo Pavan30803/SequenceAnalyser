@@ -1,4 +1,4 @@
-import { startTransition, useDeferredValue, useEffect, useId, useRef, useState } from 'react'
+import { startTransition, useDeferredValue, useEffect, useId, useMemo, useRef, useState } from 'react'
 import { Bar, Pie } from 'react-chartjs-2'
 import {
   ArcElement,
@@ -86,6 +86,7 @@ const REASON_COLUMN = 'Skip/hold reason'
 const OUTLOOK_COLUMN = 'Outlook'
 const RELEASE_SEQUENCE_COLUMN = 'Release sequence'
 const SEQUENCE_COLUMNS = ['Line in sequence', 'Production Date', 'Line in time', RELEASE_SEQUENCE_COLUMN]
+const ASSEMBLY_STATIONS = Array.from({ length: 36 }, (_, index) => String((index + 1) * 10).padStart(3, '0'))
 const LANDING_IMAGE_URL = 'https://www.bharatbenz.com/uploads/homebanner_images/large/BB-Construction.jpg'
 const LINE_TYPES = {
   HDT: {
@@ -107,8 +108,8 @@ const DEFAULT_SCHEDULE_SETTINGS = {
   HDT: {
     numberOfShifts: 2,
     shifts: [
-      { label: 'A shift', start: '07:00', end: '16:45' },
-      { label: 'B shift', start: '16:45', end: '02:20' },
+      { label: 'A shift', start: '07:00', end: '16:46' },
+      { label: 'B shift', start: '16:46', end: '02:20' },
       { label: 'C shift', start: '02:20', end: '07:00' },
     ],
     breaks: [
@@ -124,8 +125,8 @@ const DEFAULT_SCHEDULE_SETTINGS = {
   MDT: {
     numberOfShifts: 1,
     shifts: [
-      { label: 'A shift', start: '07:00', end: '16:45' },
-      { label: 'B shift', start: '16:45', end: '02:20' },
+      { label: 'A shift', start: '07:00', end: '16:46' },
+      { label: 'B shift', start: '16:46', end: '02:20' },
       { label: 'C shift', start: '02:20', end: '07:00' },
     ],
     breaks: [
@@ -372,11 +373,17 @@ function createCriticalPartRow(patch = {}) {
     l4Name: '',
     smName: '',
     pointOfFit: '',
+    pointOfFitStation: '',
     referenceOrderNumber: '',
     availableStock: '',
+    usage: '1',
     expectedQty: '',
     expectedEta: '',
+    variantFile: null,
+    variantFileName: '',
     requirementCoverage: [],
+    addedAt: new Date().toISOString(),
+    resolvedAt: '',
     ...patch,
   }
 }
@@ -389,16 +396,102 @@ function getPartNumberFromFileName(fileName = '') {
   return fileName.replace(/\.[^/.]+$/, '').replaceAll('.', '').trim()
 }
 
+function getVariantFileForPart(partNumber, files = [], index = 0, totalParts = 0) {
+  const normalizedPartNumber = normalizeCriticalPartNumber(partNumber)
+  const matchedFile = files.find((file) => normalizeCriticalPartNumber(getPartNumberFromFileName(file.name)) === normalizedPartNumber)
+  if (matchedFile) {
+    return matchedFile
+  }
+  return files.length === totalParts ? files[index] : null
+}
+
+function hasCriticalPartLookupDetails(part = {}) {
+  return [
+    part.partDescription,
+    part.vendorName,
+    part.supplierBacklog,
+    part.pmcName,
+    part.l4Name,
+    part.smName,
+  ].some((value) => {
+    const normalizedValue = normalizeLookupKey(value)
+    return normalizedValue && normalizedValue !== 'NA'
+  }) || (Array.isArray(part.requirementCoverage) && part.requirementCoverage.length > 0)
+}
+
 function createShortageRow(file = null) {
   return {
     id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
     part: file ? getPartNumberFromFileName(file.name) : '',
     partName: '',
+    pointOfFitStation: '',
     ref: '',
     qty: '',
     usage: '1',
     file,
   }
+}
+
+function buildShortagesFromCriticalParts(parts = []) {
+  return parts
+    .filter((part) => normalizeCriticalPartNumber(part.partNumber) && part.variantFile)
+    .map((part) => ({
+      id: part.id,
+      part: normalizeCriticalPartNumber(part.partNumber),
+      partName: part.partDescription ?? '',
+      pointOfFitStation: part.pointOfFitStation ?? '',
+      ref: part.referenceOrderNumber ?? '',
+      qty: part.availableStock ?? '',
+      usage: part.usage || '1',
+      file: part.variantFile,
+      fileName: part.variantFile?.name ?? part.variantFileName ?? '',
+    }))
+}
+
+function sanitizeCriticalPartsForBackup(parts = []) {
+  return parts.map(({ variantFile, ...part }) => ({
+    ...part,
+    variantFile: null,
+    variantFileName: variantFile?.name ?? part.variantFileName ?? '',
+  }))
+}
+
+function removeCriticalPartFromAnalysisData(analysisData, removedPartNumbers = []) {
+  if (!analysisData) {
+    return analysisData
+  }
+
+  const removedKeys = new Set(removedPartNumbers.map(normalizePartKey).filter(Boolean))
+  if (!removedKeys.size) {
+    return analysisData
+  }
+
+  const shouldKeepColumn = (column) => !removedKeys.has(normalizePartKey(column))
+  const removeFromRow = (row) => Object.fromEntries(
+    Object.entries(row ?? {}).filter(([key]) => shouldKeepColumn(key)),
+  )
+
+  return {
+    ...analysisData,
+    summary: {
+      ...(analysisData.summary ?? {}),
+      shortage_parts: (analysisData.summary?.shortage_parts ?? []).filter((part) => shouldKeepColumn(part)),
+    },
+    previewColumns: (analysisData.previewColumns ?? []).filter(shouldKeepColumn),
+    previewData: (analysisData.previewData ?? []).map(removeFromRow),
+  }
+}
+
+function formatCriticalPartTimestamp(value) {
+  if (!value) {
+    return 'N/A'
+  }
+  return new Date(value).toLocaleString(undefined, {
+    day: '2-digit',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
 function normalizeData(rawData) {
@@ -423,6 +516,136 @@ function buildCsvText(columns, rows) {
   ].join('\n')
 }
 
+function getBasePreviewColumns(columns) {
+  return (Array.isArray(columns) ? columns : []).filter(
+    (column) => !SEQUENCE_COLUMNS.includes(column) && column !== REASON_COLUMN && column !== OUTLOOK_COLUMN,
+  )
+}
+
+function getBasePreviewRows(rows) {
+  return (Array.isArray(rows) ? rows : []).map((row) => {
+    const nextRow = { ...row }
+    for (const column of [...SEQUENCE_COLUMNS, REASON_COLUMN, OUTLOOK_COLUMN]) {
+      delete nextRow[column]
+    }
+    return nextRow
+  })
+}
+
+function formatBackupTime(value) {
+  if (!value) {
+    return 'Unknown time'
+  }
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return 'Unknown time'
+  }
+  return date.toLocaleString([], {
+    day: '2-digit',
+    month: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+function createEmptyRestoredFileNames() {
+  return {
+    reports: { opening: '', mod: '' },
+    sevenDaysReportFile: '',
+    engineStatusFile: '',
+    axleStatusFile: '',
+    frameStatusFile: '',
+  }
+}
+
+function getWorkspaceSnapshot({
+  reportFiles,
+  reportUploadedAt,
+  modStartSequence,
+  sevenDaysReportFile,
+  engineStatusFile,
+  axleStatusFile,
+  frameStatusFile,
+  restoredFileNames,
+  capacity,
+  startDate,
+  scheduleSettings,
+  holidayInput,
+  holidays,
+  workingSaturdayInput,
+  workingSaturdays,
+  shortages,
+  analyses,
+  activeReport,
+  reasonConfig,
+  criticalParts,
+  resolvedCriticalParts,
+  criticalPartDraft,
+  criticalPartBulkInput,
+  criticalL4Directory,
+  lineType,
+}) {
+  return {
+    lineType,
+    reportFiles,
+    reportUploadedAt,
+    modStartSequence,
+    sevenDaysReportFile,
+    engineStatusFile,
+    axleStatusFile,
+    frameStatusFile,
+    restoredFileNames,
+    capacity,
+    startDate,
+    scheduleSettings,
+    holidayInput,
+    holidays,
+    workingSaturdayInput,
+    workingSaturdays,
+    shortages,
+    analyses,
+    activeReport,
+    reasonConfig,
+    criticalParts,
+    resolvedCriticalParts,
+    criticalPartDraft,
+    criticalPartBulkInput,
+    criticalL4Directory,
+    savedAt: new Date().toISOString(),
+  }
+}
+
+function getSerializableWorkspaceSnapshot(snapshot) {
+  return {
+    ...snapshot,
+    criticalParts: sanitizeCriticalPartsForBackup(snapshot.criticalParts),
+    criticalPartDraft: sanitizeCriticalPartsForBackup([snapshot.criticalPartDraft])[0] ?? createCriticalPartRow(),
+    reportFiles: {
+      opening: null,
+      mod: null,
+    },
+    sevenDaysReportFile: null,
+    engineStatusFile: null,
+    axleStatusFile: null,
+    frameStatusFile: null,
+    restoredFileNames: {
+      reports: {
+        opening: snapshot.reportFiles.opening?.name ?? snapshot.restoredFileNames?.reports?.opening ?? '',
+        mod: snapshot.reportFiles.mod?.name ?? snapshot.restoredFileNames?.reports?.mod ?? '',
+      },
+      sevenDaysReportFile: snapshot.sevenDaysReportFile?.name ?? snapshot.restoredFileNames?.sevenDaysReportFile ?? '',
+      engineStatusFile: snapshot.engineStatusFile?.name ?? snapshot.restoredFileNames?.engineStatusFile ?? '',
+      axleStatusFile: snapshot.axleStatusFile?.name ?? snapshot.restoredFileNames?.axleStatusFile ?? '',
+      frameStatusFile: snapshot.frameStatusFile?.name ?? snapshot.restoredFileNames?.frameStatusFile ?? '',
+    },
+    shortages: snapshot.shortages.map(({ file, ...shortage }) => ({
+      ...shortage,
+      file: null,
+      fileName: file?.name ?? shortage.fileName ?? '',
+    })),
+  }
+}
+
 function triggerDownload(fileName, columns, rows) {
   const csv = buildCsvText(columns, rows)
   const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
@@ -441,7 +664,8 @@ function getShortageCount(row) {
 }
 
 function normalizeLookupValue(value) {
-  return String(value ?? '').trim()
+  const text = String(value ?? '').trim()
+  return ['nan', 'none', 'null', 'undefined'].includes(text.toLowerCase()) ? '' : text
 }
 
 function normalizeLookupKey(value) {
@@ -600,8 +824,8 @@ function getAvailableGroups(rows, groupBy) {
   return [...new Set(rows.map((row) => getGroupValue(row, groupBy)))].sort((a, b) => a.localeCompare(b))
 }
 
-function getReasonForOrder(row, reasonBucket, fallback = '') {
-  const orderKey = getOrderKey(row, fallback)
+function getReasonForOrder(row, reasonBucket, fallback = '', orderKeyOverride = '') {
+  const orderKey = orderKeyOverride || getOrderKey(row, fallback)
   const directReason = reasonBucket.orderReasons[orderKey]
   if (directReason !== undefined && directReason !== '') {
     return directReason
@@ -611,8 +835,8 @@ function getReasonForOrder(row, reasonBucket, fallback = '') {
   return reasonBucket.groupReasons[reasonBucket.groupBy]?.[groupValue] ?? ''
 }
 
-function getOutlookForOrder(row, reasonBucket, fallback = '') {
-  const orderKey = getOrderKey(row, fallback)
+function getOutlookForOrder(row, reasonBucket, fallback = '', orderKeyOverride = '') {
+  const orderKey = orderKeyOverride || getOrderKey(row, fallback)
   const directOutlook = reasonBucket.orderOutlooks[orderKey]
   if (directOutlook !== undefined && directOutlook !== '') {
     return directOutlook
@@ -762,12 +986,15 @@ function applySkipHoldReasons(sequencedPreview, analysis, reasonConfig, released
   }
 }
 
-function getNextWorkingDay(date, holidays) {
+function getNextWorkingDay(date, holidays = [], workingSaturdays = []) {
   const nextDate = new Date(date)
 
   while (true) {
     const key = formatDateKey(nextDate)
-    if (nextDate.getDay() !== 0 && !holidays.includes(key)) {
+    const day = nextDate.getDay()
+    const isExplicitHoliday = holidays.includes(key)
+    const isDefaultHoliday = day === 0 || (day === 6 && !workingSaturdays.includes(key))
+    if (!isExplicitHoliday && !isDefaultHoliday) {
       return nextDate
     }
     nextDate.setDate(nextDate.getDate() + 1)
@@ -779,6 +1006,27 @@ function formatDateKey(date) {
   const month = String(date.getMonth() + 1).padStart(2, '0')
   const day = String(date.getDate()).padStart(2, '0')
   return `${year}-${month}-${day}`
+}
+
+function getUpcomingSaturdays(anchorDateKey) {
+  const anchorDate = anchorDateKey ? new Date(`${anchorDateKey}T00:00:00`) : new Date()
+  if (Number.isNaN(anchorDate.getTime())) {
+    return []
+  }
+
+  return Array.from({ length: 10 }, (_, offset) => {
+    const date = new Date(anchorDate)
+    date.setDate(anchorDate.getDate() + offset)
+    return date
+  }).filter((date) => date.getDay() === 6)
+}
+
+function formatCalendarLabel(date) {
+  return date.toLocaleDateString(undefined, {
+    weekday: 'short',
+    day: '2-digit',
+    month: 'short',
+  })
 }
 
 function formatLineTime(date) {
@@ -821,7 +1069,7 @@ function getProductionDateFromTimestamp(timestamp, lineType, scheduleSettings) {
   return productionDate
 }
 
-function getModStartTime(uploadedAt, holidays, lineType, scheduleSettings) {
+function getModStartTime(uploadedAt, holidays, lineType, scheduleSettings, workingSaturdays = []) {
   const uploadTime = new Date(uploadedAt)
   if (Number.isNaN(uploadTime.getTime())) {
     return null
@@ -842,7 +1090,7 @@ function getModStartTime(uploadedAt, holidays, lineType, scheduleSettings) {
 
   if (currentTime >= shiftEnd) {
     productionDate.setDate(productionDate.getDate() + 1)
-    productionDate = getNextWorkingDay(productionDate, holidays)
+    productionDate = getNextWorkingDay(productionDate, holidays, workingSaturdays)
     shiftStart = getShiftStartTime(productionDate, lineType, scheduleSettings)
     shiftEnd = getShiftEndTime(productionDate, lineType, scheduleSettings)
     currentTime = new Date(shiftStart)
@@ -851,7 +1099,7 @@ function getModStartTime(uploadedAt, holidays, lineType, scheduleSettings) {
   currentTime = skipProductionBreaks(currentTime, productionDate, lineType, scheduleSettings)
   if (currentTime >= shiftEnd) {
     productionDate.setDate(productionDate.getDate() + 1)
-    productionDate = getNextWorkingDay(productionDate, holidays)
+    productionDate = getNextWorkingDay(productionDate, holidays, workingSaturdays)
     currentTime = getShiftStartTime(productionDate, lineType, scheduleSettings)
   }
 
@@ -916,9 +1164,9 @@ function getDayCapacity(baseCapacity, currentDayMinutes, standardMinutes) {
     : Math.max(1, Math.floor(baseCapacity * (currentDayMinutes / standardMinutes)))
 }
 
-function applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType = 'HDT', baselineRows = [], scheduleSettings) {
+function applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType = 'HDT', baselineRows = [], scheduleSettings, workingSaturdays = []) {
   const [year, month, day] = startDate.split('-').map((value) => Number.parseInt(value, 10))
-  let currentDate = getNextWorkingDay(new Date(year, month - 1, day), holidays)
+  let currentDate = getNextWorkingDay(new Date(year, month - 1, day), holidays, workingSaturdays)
   let releaseStarted = false
   let releaseCounter = 1
   let todayCapacity = baseCapacity
@@ -927,9 +1175,8 @@ function applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType 
   const hasReleaseBaseline = releaseBaseline.size > 0
 
   for (const row of rows) {
-    const status = normalizeLookupKey(getPreviewValue(row, ['Status', 'STATUS', 'status']))
     const state = getPreviewOrderState(row)
-    if (!releaseStarted && status === 'PBS' && state === 'CREATED') {
+    if (!releaseStarted && state === 'CREATED') {
       releaseStarted = true
       const baselineSequence = Number.parseInt(releaseBaseline.get(getPreviewVehicleKey(row)), 10)
       if (hasReleaseBaseline && Number.isFinite(baselineSequence) && baselineSequence > 0) {
@@ -952,7 +1199,7 @@ function applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType 
     if (releaseCounter > todayCapacity) {
       releaseCounter = 1
       currentDate.setDate(currentDate.getDate() + 1)
-      currentDate = getNextWorkingDay(currentDate, holidays)
+      currentDate = getNextWorkingDay(currentDate, holidays, workingSaturdays)
     }
   }
 }
@@ -963,6 +1210,7 @@ function applySequence(
   capacityValue,
   startDate,
   holidays,
+  workingSaturdays = [],
   lineType = 'HDT',
   scheduleSettings,
   baselineRows = [],
@@ -1002,7 +1250,7 @@ function applySequence(
   }
 
   const [year, month, day] = startDate.split('-').map((value) => Number.parseInt(value, 10))
-  let currentDate = getNextWorkingDay(new Date(year, month - 1, day), holidays)
+  let currentDate = getNextWorkingDay(new Date(year, month - 1, day), holidays, workingSaturdays)
   const columns = [...previewColumns]
   const statusIndex = columns.indexOf('Status')
 
@@ -1027,7 +1275,7 @@ function applySequence(
       const status = String(row.Status ?? '').trim().toUpperCase()
       return status === 'TRIM LINE' && !modSkipKeys.has(getPreviewVehicleKey(row))
     })
-    const modStart = getModStartTime(modUploadedAt, holidays, lineType, scheduleSettings)
+    const modStart = getModStartTime(modUploadedAt, holidays, lineType, scheduleSettings, workingSaturdays)
     const anchoredSequence = Number.parseInt(modStartSequence, 10)
 
     rows.forEach((row) => {
@@ -1038,7 +1286,7 @@ function applySequence(
     })
 
     if (firstTrimIndex === -1 || !modStart || !Number.isFinite(anchoredSequence) || anchoredSequence <= 0) {
-      applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType, baselineRows, scheduleSettings)
+      applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType, baselineRows, scheduleSettings, workingSaturdays)
       return {
         columns,
         rows,
@@ -1067,7 +1315,7 @@ function applySequence(
       if (!isModStartDay && counter > todayCapacity) {
         counter = 1
         currentDate.setDate(currentDate.getDate() + 1)
-        currentDate = getNextWorkingDay(currentDate, holidays)
+        currentDate = getNextWorkingDay(currentDate, holidays, workingSaturdays)
         currentTime = getShiftStartTime(currentDate, lineType, scheduleSettings)
         currentDayMinutes = getScheduleProfile(lineType, currentDate, scheduleSettings).totalMinutes
         todayCapacity = getDayCapacity(baseCapacity, currentDayMinutes, standardTotalMinutes)
@@ -1079,7 +1327,7 @@ function applySequence(
       if (currentTime > shiftEnd) {
         counter = 1
         currentDate.setDate(currentDate.getDate() + 1)
-        currentDate = getNextWorkingDay(currentDate, holidays)
+        currentDate = getNextWorkingDay(currentDate, holidays, workingSaturdays)
         currentTime = getShiftStartTime(currentDate, lineType, scheduleSettings)
         currentDayMinutes = getScheduleProfile(lineType, currentDate, scheduleSettings).totalMinutes
         todayCapacity = getDayCapacity(baseCapacity, currentDayMinutes, standardTotalMinutes)
@@ -1098,13 +1346,13 @@ function applySequence(
       if (currentTime >= shiftEnd) {
         counter = 1
         currentDate.setDate(currentDate.getDate() + 1)
-        currentDate = getNextWorkingDay(currentDate, holidays)
+        currentDate = getNextWorkingDay(currentDate, holidays, workingSaturdays)
         currentTime = getShiftStartTime(currentDate, lineType, scheduleSettings)
         isModStartDay = false
       }
     }
 
-    applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType, baselineRows, scheduleSettings)
+    applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType, baselineRows, scheduleSettings, workingSaturdays)
 
     return {
       columns,
@@ -1141,7 +1389,7 @@ function applySequence(
     if (currentTime > getShiftEndTime(currentDate, lineType, scheduleSettings)) {
       counter = 1
       currentDate.setDate(currentDate.getDate() + 1)
-      currentDate = getNextWorkingDay(currentDate, holidays)
+      currentDate = getNextWorkingDay(currentDate, holidays, workingSaturdays)
       currentDayMinutes = getScheduleProfile(lineType, currentDate, scheduleSettings).totalMinutes
       todayCapacity = getDayCapacity(baseCapacity, currentDayMinutes, standardTotalMinutes)
       taktTime = currentDayMinutes / todayCapacity
@@ -1156,11 +1404,11 @@ function applySequence(
     if (counter > todayCapacity) {
       counter = 1
       currentDate.setDate(currentDate.getDate() + 1)
-      currentDate = getNextWorkingDay(currentDate, holidays)
+      currentDate = getNextWorkingDay(currentDate, holidays, workingSaturdays)
     }
   }
 
-  applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType, [], scheduleSettings)
+  applyReleaseSequence(rows, baseCapacity, startDate, holidays, lineType, [], scheduleSettings, workingSaturdays)
 
   return {
     columns,
@@ -1171,16 +1419,18 @@ function applySequence(
   }
 }
 
-function buildInference(rows, shortageParts, shortagePartNames = {}) {
+function buildInference(rows, shortageParts, shortageDetails = {}, taktTime = null) {
   if (!Array.isArray(shortageParts) || shortageParts.length === 0) {
     return []
   }
 
   const allDates = [...new Set(rows.map((row) => row['Production Date']).filter(Boolean))].sort()
-  const getPartName = (part) => shortagePartNames[part] ?? shortagePartNames[normalizePartKey(part)] ?? ''
+  const getPartDetail = (part) => shortageDetails[part] ?? shortageDetails[normalizePartKey(part)] ?? {}
 
   return shortageParts.map((part) => {
-    const partName = getPartName(part)
+    const partDetail = getPartDetail(part)
+    const partName = partDetail.partName ?? ''
+    const pointOfFitStation = partDetail.pointOfFitStation ?? ''
     const connectedRows = rows.filter((row) => row[part])
     const impactedRows = connectedRows.filter((row) => SHORTAGE_MARKERS.has(String(row[part])))
     const scheduledConnectedRows = connectedRows.filter((row) => row['Production Date'])
@@ -1196,13 +1446,16 @@ function buildInference(rows, shortageParts, shortagePartNames = {}) {
 
     const firstImpactedRow = scheduledImpactedRows[0]
     const shortageDate = firstImpactedRow?.['Production Date'] ?? 'Not Scheduled'
-    const impactTime = firstImpactedRow?.['Line in time'] ?? 'Not Scheduled'
+    const scheduledImpactTime = firstImpactedRow?.['Line in time'] ?? 'Not Scheduled'
+    const pointOfFitImpactTime = pointOfFitStation
+      ? getPointOfFitImpactTime(scheduledImpactTime, pointOfFitStation, taktTime)
+      : 'N/A'
     const connectingModels = [...new Set(impactedRows.map((row) => row.Model || 'Unknown'))].join(', ')
-    const firstDaySequences = scheduledImpactedRows
+    const firstDaySequenceNumbers = scheduledImpactedRows
       .filter((row) => row['Production Date'] === shortageDate)
       .map((row) => row['Line in sequence'])
       .filter(Boolean)
-      .join(', ')
+    const firstDaySequences = firstDaySequenceNumbers.join(', ')
 
     let forecast = []
     if (scheduledImpactedRows.length > 0) {
@@ -1218,10 +1471,14 @@ function buildInference(rows, shortageParts, shortagePartNames = {}) {
     return {
       part,
       partName,
+      pointOfFitStation,
       covered: false,
       shortageDate,
-      impactTime,
+      impactTime: scheduledImpactTime,
+      scheduledImpactTime,
+      pointOfFitImpactTime,
       connectingModels,
+      firstDaySequenceNumbers,
       firstDaySequences: firstDaySequences || 'None',
       forecast,
       unscheduled: scheduledImpactedRows.length === 0,
@@ -1407,6 +1664,33 @@ function getLineTimeMinute(value) {
 
   const minuteOfDay = hours * 60 + minutes
   return minuteOfDay < 7 * 60 ? minuteOfDay + 24 * 60 : minuteOfDay
+}
+
+function formatMinuteAsLineTime(minutes) {
+  const date = new Date(2000, 0, 1)
+  date.setHours(0, 0, 0, 0)
+  date.setMinutes(minutes)
+  return formatLineTime(date)
+}
+
+function getPointOfFitImpactTime(lineInTime, pointOfFitStation, taktTime) {
+  const lineMinute = getLineTimeMinute(lineInTime)
+  const stationNumber = Number.parseInt(pointOfFitStation, 10)
+  const taktMinutes = Number(taktTime)
+
+  if (
+    lineMinute === null ||
+    !Number.isFinite(stationNumber) ||
+    stationNumber <= 0 ||
+    !Number.isFinite(taktMinutes) ||
+    taktMinutes <= 0
+  ) {
+    return 'N/A'
+  }
+
+  const stationIndex = stationNumber / 10
+  const offsetMinutes = (stationIndex - 1) * taktMinutes
+  return formatMinuteAsLineTime(lineMinute + offsetMinutes)
 }
 
 function buildStatusCounts(rows, column) {
@@ -1595,7 +1879,7 @@ function EmptyChart({ message }) {
 function PieChartCard({ title, icon, data, emptyMessage }) {
   const hasData = data.labels.length > 0
   return (
-    <div className="panel-card h-100">
+    <div className="panel-card h-100" data-backup-chart-title={title}>
       <div className="panel-card-header">
         <span>
           <i className={`bi ${icon}`} /> {title}
@@ -1628,7 +1912,7 @@ function PieChartCard({ title, icon, data, emptyMessage }) {
 function BarChartCard({ title, icon, labels, values, colors, orders, categoryKey }) {
   const hasData = Math.max(...values, 0) > 0
   return (
-    <div className="panel-card h-100 compact-card">
+    <div className="panel-card h-100 compact-card" data-backup-chart-title={title}>
       <div className="panel-card-header compact-header">
         <span>
           <i className={`bi ${icon}`} /> {title}
@@ -1643,6 +1927,46 @@ function BarChartCard({ title, icon, labels, values, colors, orders, categoryKey
       </div>
     </div>
   )
+}
+
+function captureChartImage(canvas) {
+  const maxWidth = 960
+  const scale = Math.min(1, maxWidth / Math.max(canvas.width, 1))
+  const targetWidth = Math.max(1, Math.round(canvas.width * scale))
+  const targetHeight = Math.max(1, Math.round(canvas.height * scale))
+  const outputCanvas = document.createElement('canvas')
+  outputCanvas.width = targetWidth
+  outputCanvas.height = targetHeight
+  const context = outputCanvas.getContext('2d')
+
+  if (!context) {
+    return canvas.toDataURL('image/jpeg', 0.72)
+  }
+
+  context.fillStyle = '#ffffff'
+  context.fillRect(0, 0, targetWidth, targetHeight)
+  context.drawImage(canvas, 0, 0, targetWidth, targetHeight)
+  return outputCanvas.toDataURL('image/jpeg', 0.72)
+}
+
+function captureBackupChartImages() {
+  return [...document.querySelectorAll('.chart-groups [data-backup-chart-title]')]
+    .map((card) => {
+      const canvas = card.querySelector('canvas')
+      if (!canvas) {
+        return null
+      }
+
+      try {
+        return {
+          title: card.getAttribute('data-backup-chart-title') || 'Chart',
+          image: captureChartImage(canvas),
+        }
+      } catch {
+        return null
+      }
+    })
+    .filter(Boolean)
 }
 
 function Toasts({ items, onDismiss }) {
@@ -1814,13 +2138,13 @@ function ResultsTable({
                     const orderKey = getOrderKey(row, index)
                     const directReason = reasonBucket.orderReasons[orderKey]
                     const directOutlook = reasonBucket.orderOutlooks[orderKey]
-                    const effectiveReason = getReasonForOrder(row, reasonBucket, index)
-                    const effectiveOutlook = getOutlookForOrder(row, reasonBucket, index)
+                    const effectiveReason = getReasonForOrder(row, reasonBucket, index, orderKey)
+                    const effectiveOutlook = getOutlookForOrder(row, reasonBucket, index, orderKey)
                     const inheritedReason = directReason === undefined && effectiveReason
                     const inheritedOutlook = directOutlook === undefined && effectiveOutlook
 
                     return (
-                      <tr key={`${title}-${row.serial || row.dsn || index}`} className={isHoldTable ? 'row-hold' : 'row-skip'}>
+                      <tr key={`${title}-${orderKey || 'row'}-${index}`} className={isHoldTable ? 'row-hold' : 'row-skip'}>
                         {columns.map(([label, key]) => (
                           <td key={`${label}-${key}`}>
                             <OrderCell field={key} value={row[key]} holdTable={isHoldTable} />
@@ -1863,21 +2187,39 @@ function CriticalPartInfoView({
   draft,
   lookupLoading,
   sevenDaysReportFile,
+  sevenDaysReportFileName,
   onDraftChange,
   onDraftPartBlur,
   onDraftRefresh,
+  onDraftVariantFileChange,
   onAddPart,
   bulkInput,
   onBulkInputChange,
+  bulkVariantFiles,
+  onBulkVariantFilesChange,
   onBulkAdd,
   onPartChange,
+  onPartVariantFileChange,
   onRemovePart,
+  onUpdateImpactAnalysis,
+  analysisLoading,
+  resolvedParts,
 }) {
+  const scrollToPart = (partId) => {
+    const target = document.getElementById(`critical-part-${partId}`)
+    if (!target) {
+      return
+    }
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' })
+    target.classList.add('critical-part-focus')
+    window.setTimeout(() => target.classList.remove('critical-part-focus'), 1600)
+  }
   const plannerFields = [
     ['Part Number', 'partNumber'],
-    ['Point of Fit', 'pointOfFit'],
+    ['Point of Fit Station', 'pointOfFitStation'],
     ['Reference order number', 'referenceOrderNumber'],
     ['Available stock', 'availableStock'],
+    ['Usage / vehicle', 'usage'],
     ['Expected qty', 'expectedQty'],
     ['Expected ETA', 'expectedEta'],
   ]
@@ -1939,22 +2281,49 @@ function CriticalPartInfoView({
   const renderField = (record, field, label, onChange, onBlur) => (
     <label className="critical-part-field" key={`${record.id ?? 'draft'}-${field}`}>
       <span>{label}</span>
-      <input
-        type={field === 'expectedEta' ? 'datetime-local' : field === 'availableStock' || field === 'expectedQty' ? 'number' : 'text'}
-        className="form-control form-control-sm"
-        min={field === 'availableStock' || field === 'expectedQty' ? '0' : undefined}
-        value={record[field]}
-        onBlur={field === 'partNumber' ? onBlur : undefined}
-        onChange={(event) => onChange({ [field]: event.target.value })}
-      />
+      {field === 'pointOfFitStation' ? (
+        <select
+          className="form-select form-select-sm"
+          value={record[field] ?? ''}
+          onChange={(event) => onChange({ [field]: event.target.value })}
+        >
+          <option value="">Select station</option>
+          {ASSEMBLY_STATIONS.map((station) => (
+            <option key={station} value={station}>{station}</option>
+          ))}
+        </select>
+      ) : (
+        <input
+          type={field === 'expectedEta' ? 'datetime-local' : ['availableStock', 'expectedQty', 'usage'].includes(field) ? 'number' : 'text'}
+          className="form-control form-control-sm"
+          min={['availableStock', 'expectedQty'].includes(field) ? '0' : field === 'usage' ? '1' : undefined}
+          step={field === 'usage' ? '1' : undefined}
+          value={record[field]}
+          onBlur={field === 'partNumber' ? onBlur : undefined}
+          onChange={(event) => onChange({ [field]: event.target.value })}
+        />
+      )}
     </label>
   )
-  const renderGroupedFields = (record, onChange, onPartNumberBlur) => (
+  const renderVariantFileField = (record, onFileChange) => (
+    <label className="critical-part-field critical-part-file-field">
+      <span>Variant File</span>
+      <input
+        type="file"
+        accept=".xlsx,.xls,.csv"
+        className="form-control form-control-sm"
+        onChange={(event) => onFileChange(event.target.files?.[0] ?? null)}
+      />
+      <small>{record.variantFile?.name || record.variantFileName || 'No variant file selected'}</small>
+    </label>
+  )
+  const renderGroupedFields = (record, onChange, onPartNumberBlur, onFileChange) => (
     <div className="critical-part-field-groups">
       <div className="critical-part-field-group">
-        <h6>Planner inputs</h6>
+        <h6>Planner inputs and shortage mapping</h6>
         <div className="critical-part-grid">
           {plannerFields.map(([label, field]) => renderField(record, field, label, onChange, onPartNumberBlur))}
+          {renderVariantFileField(record, onFileChange)}
         </div>
       </div>
       <div className="critical-part-field-group critical-part-auto-group">
@@ -1966,7 +2335,127 @@ function CriticalPartInfoView({
       </div>
     </div>
   )
+  const renderCoverageSummary = () => {
+    if (!parts.length) {
+      return null
+    }
+    const days = ['N', 'N+1', 'N+2', 'N+3', 'N+4']
+    const getPmcSummaryName = (part) => {
+      const pmcName = String(part.pmcName ?? '').trim()
+      const smName = String(part.smName ?? '').trim()
+      if (pmcName && normalizeLookupKey(pmcName) !== 'NA') {
+        return pmcName
+      }
+      return smName && normalizeLookupKey(smName) !== 'NA' ? `${smName} (SM)` : 'NA'
+    }
+    const dayPriority = new Map(days.map((day, index) => [day, index]))
+    const toDemandQty = (value) => {
+      const numericValue = Number(String(value ?? '').replace(/,/g, '').trim())
+      return Number.isFinite(numericValue) ? numericValue : 0
+    }
+    const getPartAttentionScore = (part) => {
+      let shortageQty = 0
+      let totalDemandQty = 0
+      let earliestShortageDay = Number.POSITIVE_INFINITY
+      let hasShortage = false
+      let hasAvailableDemand = false
 
+      for (const day of part.requirementCoverage ?? []) {
+        const dayIndex = dayPriority.get(day.day) ?? Number.POSITIVE_INFINITY
+        for (const shift of day.shifts ?? []) {
+          const qty = toDemandQty(shift.qty)
+          const status = normalizeLookupKey(shift.status)
+          totalDemandQty += qty
+          if (status === 'SHORTAGE') {
+            hasShortage = true
+            shortageQty += qty
+            earliestShortageDay = Math.min(earliestShortageDay, dayIndex)
+          } else if (status === 'AVAILABLE' && qty > 0) {
+            hasAvailableDemand = true
+          }
+        }
+      }
+
+      return {
+        priority: hasShortage ? 0 : hasAvailableDemand ? 1 : 2,
+        earliestShortageDay,
+        shortageQty,
+        totalDemandQty,
+      }
+    }
+    const rankedParts = [...parts]
+      .map((part) => ({ part, score: getPartAttentionScore(part) }))
+      .sort((a, b) =>
+        a.score.priority - b.score.priority ||
+        a.score.earliestShortageDay - b.score.earliestShortageDay ||
+        b.score.shortageQty - a.score.shortageQty ||
+        b.score.totalDemandQty - a.score.totalDemandQty ||
+        String(a.part.partNumber).localeCompare(String(b.part.partNumber)),
+      )
+    return (
+      <section className="critical-part-summary">
+        <div className="critical-part-summary-header">
+          <strong>Coverage summary</strong>
+          <span>{parts.length} part{parts.length === 1 ? '' : 's'}</span>
+        </div>
+        <div className="critical-part-summary-table-wrap">
+          <table className="critical-part-summary-table">
+            <thead>
+              <tr>
+                <th>Rank</th>
+                <th>Part Number</th>
+                <th>Part Description</th>
+                <th>Vendor name</th>
+                <th>Supplier backlog</th>
+                <th>PMC name</th>
+                {days.map((day) => (
+                  <th key={day}>{day}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rankedParts.map(({ part }, index) => {
+                const coverageByDay = new Map((part.requirementCoverage ?? []).map((day) => [day.day, day]))
+                return (
+                  <tr key={`summary-${part.id}`}>
+                    <td className="critical-part-rank">{index + 1}</td>
+                    <td>
+                      <button type="button" className="critical-part-summary-link" onClick={() => scrollToPart(part.id)}>
+                        {part.partNumber || 'NA'}
+                      </button>
+                    </td>
+                    <td>{part.partDescription || 'NA'}</td>
+                    <td>{part.vendorName || 'NA'}</td>
+                    <td>{part.supplierBacklog || 'NA'}</td>
+                    <td>{getPmcSummaryName(part)}</td>
+                    {days.map((day) => {
+                      const coverage = coverageByDay.get(day)
+                      const shifts = coverage?.shifts ?? []
+                      return (
+                        <td key={`${part.id}-${day}`}>
+                          <div className="summary-coverage-dots">
+                            {['A Shift', 'B Shift'].map((label) => {
+                              const shift = shifts.find((entry) => entry.label === label)
+                              return (
+                                <span key={label} className="summary-coverage-dot-wrap" title={`${label}: ${shift?.status || 'No status'}`}>
+                                  <span className={`coverage-status-dot ${getCoverageStatusClass(shift?.status)}`} />
+                                  <small>{label[0]}</small>
+                                </span>
+                              )
+                            })}
+                          </div>
+                        </td>
+                      )
+                    })}
+                  </tr>
+                )
+              })}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    )
+  }
   return (
     <section className="panel-card mb-4 critical-part-panel">
       <div className="panel-card-header">
@@ -1974,68 +2463,102 @@ function CriticalPartInfoView({
           <i className="bi bi-exclamation-diamond text-danger" /> Critical Part info
         </span>
         <small className="text-secondary">
-          {sevenDaysReportFile ? sevenDaysReportFile.name : 'Upload the 7 days report in Step 3 for part lookup.'}
+          {sevenDaysReportFile?.name || sevenDaysReportFileName || 'Upload the 7 days report in Step 3 for part lookup.'}
         </small>
       </div>
       <div className="panel-card-body">
-        {parts.length > 0 ? (
-          <div className="critical-part-list">
-            {parts.map((part, index) => (
-              <div className="critical-part-item" key={part.id}>
-                <div className="critical-part-item-header">
-                  <strong>Part {index + 1}</strong>
-                  <button type="button" className="btn btn-sm btn-outline-danger" onClick={() => onRemovePart(part.id)}>
-                    <i className="bi bi-trash" />
+        <div className="critical-part-main">
+            <div className="critical-part-add">
+              <div className="critical-part-add-header">
+                <strong>Add part details</strong>
+                <div className="critical-part-refresh-actions">
+                  {lookupLoading ? <span className="text-secondary small">Looking up part details...</span> : null}
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline-primary fw-semibold"
+                    onClick={onDraftRefresh}
+                    disabled={lookupLoading || !draft.partNumber.trim()}
+                  >
+                    {lookupLoading ? (
+                      <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true" />
+                    ) : (
+                      <i className="bi bi-arrow-clockwise" />
+                    )}
+                    <span>Refresh</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-primary fw-semibold"
+                    onClick={onUpdateImpactAnalysis}
+                    disabled={analysisLoading || lookupLoading || !parts.length}
+                  >
+                    {analysisLoading ? (
+                      <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true" />
+                    ) : (
+                      <i className="bi bi-diagram-3" />
+                    )}
+                    <span>Update impact analysis</span>
                   </button>
                 </div>
-                {renderGroupedFields(part, (patch) => onPartChange(part.id, patch))}
               </div>
-            ))}
-          </div>
-        ) : (
-          <div className="empty-table mb-3">No critical part details added yet.</div>
-        )}
-
-        <div className="critical-part-add">
-          <div className="critical-part-add-header">
-            <strong>Add part details</strong>
-            <div className="critical-part-refresh-actions">
-              {lookupLoading ? <span className="text-secondary small">Looking up part details...</span> : null}
-              <button
-                type="button"
-                className="btn btn-sm btn-outline-primary fw-semibold"
-                onClick={onDraftRefresh}
-                disabled={lookupLoading || !draft.partNumber.trim()}
-              >
-                {lookupLoading ? (
-                  <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true" />
-                ) : (
-                  <i className="bi bi-arrow-clockwise" />
-                )}
-                <span>Refresh</span>
+              {renderGroupedFields(draft, onDraftChange, onDraftPartBlur, onDraftVariantFileChange)}
+              <button type="button" className="btn btn-primary btn-sm fw-semibold" onClick={onAddPart} disabled={lookupLoading}>
+                <i className="bi bi-plus-lg me-1" />
+                Add part details
               </button>
+              <div className="critical-part-bulk">
+                <label className="critical-part-field">
+                  <span>Part numbers</span>
+                  <textarea
+                    className="form-control form-control-sm"
+                    rows="4"
+                    value={bulkInput}
+                    onChange={(event) => onBulkInputChange(event.target.value)}
+                  />
+                </label>
+                <label className="critical-part-field critical-part-file-field">
+                  <span>Connecting variant files</span>
+                  <input
+                    key={`bulk-variant-files-${bulkVariantFiles.length ? 'selected' : 'empty'}`}
+                    type="file"
+                    accept=".xlsx,.xls,.csv"
+                    className="form-control form-control-sm"
+                    multiple
+                    onChange={(event) => onBulkVariantFilesChange(Array.from(event.target.files ?? []))}
+                  />
+                  <small>
+                    {bulkVariantFiles.length
+                      ? `${bulkVariantFiles.length} file${bulkVariantFiles.length === 1 ? '' : 's'} selected`
+                      : 'No variant files selected'}
+                  </small>
+                </label>
+                <button type="button" className="btn btn-outline-primary btn-sm fw-semibold" onClick={onBulkAdd} disabled={lookupLoading || (!bulkInput.trim() && bulkVariantFiles.length === 0)}>
+                  <i className="bi bi-list-plus me-1" />
+                  Add critical parts
+                </button>
+              </div>
             </div>
-          </div>
-          {renderGroupedFields(draft, onDraftChange, onDraftPartBlur)}
-          <button type="button" className="btn btn-primary btn-sm fw-semibold" onClick={onAddPart} disabled={lookupLoading}>
-            <i className="bi bi-plus-lg me-1" />
-            Add part details
-          </button>
-          <div className="critical-part-bulk">
-            <label className="critical-part-field">
-              <span>Paste multiple part numbers</span>
-              <textarea
-                className="form-control form-control-sm"
-                rows="4"
-                value={bulkInput}
-                onChange={(event) => onBulkInputChange(event.target.value)}
-              />
-            </label>
-            <button type="button" className="btn btn-outline-primary btn-sm fw-semibold" onClick={onBulkAdd} disabled={lookupLoading || !bulkInput.trim()}>
-              <i className="bi bi-list-plus me-1" />
-              Add pasted parts
-            </button>
-          </div>
+            {parts.length > 0 ? (
+              <div className="critical-part-list">
+                {parts.map((part, index) => (
+                  <div className="critical-part-item" id={`critical-part-${part.id}`} key={part.id}>
+                    <div className="critical-part-item-header">
+                      <strong>
+                        Part {index + 1}
+                        <span className="critical-part-time">Added {formatCriticalPartTimestamp(part.addedAt)}</span>
+                      </strong>
+                      <button type="button" className="btn btn-sm btn-outline-danger" onClick={() => onRemovePart(part.id)}>
+                        <i className="bi bi-trash" />
+                      </button>
+                    </div>
+                    {renderGroupedFields(part, (patch) => onPartChange(part.id, patch), undefined, (file) => onPartVariantFileChange(part.id, file))}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="empty-table mb-3">No critical part details added yet.</div>
+            )}
+            {renderCoverageSummary()}
         </div>
       </div>
     </section>
@@ -2422,9 +2945,6 @@ function SettingsView({ lineType, settings, onBack, onReset, onNumberOfShiftsCha
 
 function App() {
   const fileInputId = useId()
-  const shortageBatchInputId = useId()
-  const shortageIntro =
-    'Upload variant Excel files, confirm the derived part number, and provide part name, reference order, and quantity for each shortage.'
   const [reportFiles, setReportFiles] = useState({ opening: null, mod: null })
   const [reportUploadedAt, setReportUploadedAt] = useState({ opening: null, mod: null })
   const [modStartSequence, setModStartSequence] = useState('')
@@ -2432,6 +2952,7 @@ function App() {
   const [engineStatusFile, setEngineStatusFile] = useState(null)
   const [axleStatusFile, setAxleStatusFile] = useState(null)
   const [frameStatusFile, setFrameStatusFile] = useState(null)
+  const [restoredFileNames, setRestoredFileNames] = useState(createEmptyRestoredFileNames)
   const [dragActiveReport, setDragActiveReport] = useState(null)
   const [capacity, setCapacity] = useState('')
   const [startDate, setStartDate] = useState('')
@@ -2440,31 +2961,48 @@ function App() {
   const [showSettings, setShowSettings] = useState(false)
   const [holidayInput, setHolidayInput] = useState('')
   const [holidays, setHolidays] = useState([])
+  const [workingSaturdayInput, setWorkingSaturdayInput] = useState('')
+  const [workingSaturdays, setWorkingSaturdays] = useState([])
   const [shortages, setShortages] = useState([createShortageRow()])
   const [analyses, setAnalyses] = useState({ opening: null, mod: null })
   const [activeReport, setActiveReport] = useState('opening')
   const [reasonConfig, setReasonConfig] = useState(createReasonState)
   const [criticalParts, setCriticalParts] = useState([])
+  const [resolvedCriticalParts, setResolvedCriticalParts] = useState([])
   const [criticalPartDraft, setCriticalPartDraft] = useState(() => createCriticalPartRow())
   const [criticalPartBulkInput, setCriticalPartBulkInput] = useState('')
+  const [criticalPartBulkVariantFiles, setCriticalPartBulkVariantFiles] = useState([])
   const [criticalLookupLoading, setCriticalLookupLoading] = useState(false)
+  const [criticalL4Directory, setCriticalL4Directory] = useState([])
   const [showLanding, setShowLanding] = useState(getInitialLandingState)
   const [loading, setLoading] = useState(false)
   const [savingConstraints, setSavingConstraints] = useState(false)
+  const [constraintBackups, setConstraintBackups] = useState([])
+  const [backupLoading, setBackupLoading] = useState(false)
+  const [restoringBackupId, setRestoringBackupId] = useState('')
   const [toasts, setToasts] = useState([])
   const resultsRef = useRef(null)
   const toastCounterRef = useRef(0)
   const workspaceLoadedRef = useRef(false)
   const workspaceSaveTimerRef = useRef(null)
-  const shortagePartNames = shortages.reduce((partNames, shortage) => {
+  const criticalPartLookupCacheRef = useRef(new Map())
+  const criticalPartShortages = useMemo(() => buildShortagesFromCriticalParts(criticalParts), [criticalParts])
+  const activeShortages = useMemo(
+    () => (criticalPartShortages.length > 0 ? criticalPartShortages : shortages),
+    [criticalPartShortages, shortages],
+  )
+  const shortagePartDetails = useMemo(() => activeShortages.reduce((partDetails, shortage) => {
     const part = shortage.part.trim()
-    const partName = shortage.partName.trim()
     if (part) {
-      partNames[part] = partName
-      partNames[normalizePartKey(part)] = partName
+      const detail = {
+        partName: shortage.partName.trim(),
+        pointOfFitStation: shortage.pointOfFitStation ?? '',
+      }
+      partDetails[part] = detail
+      partDetails[normalizePartKey(part)] = detail
     }
-    return partNames
-  }, {})
+    return partDetails
+  }, {}), [activeShortages])
   const analysis = analyses[activeReport] ?? analyses.opening ?? analyses.mod
   const availableReports = Object.keys(REPORT_TYPES).filter((reportKey) => analyses[reportKey])
   const availableReportViews = analyses.opening
@@ -2474,18 +3012,20 @@ function App() {
   const modUploadedAt =
     reportUploadedAt.mod ??
     (reportFiles.mod?.lastModified ? new Date(reportFiles.mod.lastModified).toISOString() : null)
-  const modSkipKeys = buildVehicleKeySet(analyses.mod?.skipOrders ?? [])
+  const modSkipKeys = useMemo(() => buildVehicleKeySet(analyses.mod?.skipOrders ?? []), [analyses.mod?.skipOrders])
+  const upcomingSaturdays = useMemo(() => getUpcomingSaturdays(startDate), [startDate])
 
-  const openingSequencedPreview = applySequence(
+  const openingSequencedPreview = useMemo(() => applySequence(
     analyses.opening?.previewColumns ?? [],
     analyses.opening?.previewData ?? [],
     capacity,
     startDate,
     holidays,
+    workingSaturdays,
     lineType,
     scheduleSettings,
-  )
-  const sequencedPreview =
+  ), [analyses.opening, capacity, startDate, holidays, workingSaturdays, lineType, scheduleSettings])
+  const sequencedPreview = useMemo(() => (
     activeReport === 'mod' && analyses.mod
       ? applySequence(
           analyses.mod.previewColumns ?? [],
@@ -2493,6 +3033,7 @@ function App() {
           capacity,
           startDate,
           holidays,
+          workingSaturdays,
           lineType,
           scheduleSettings,
           openingSequencedPreview.rows,
@@ -2501,18 +3042,41 @@ function App() {
           modSkipKeys,
         )
       : openingSequencedPreview
-  const releasedHoldKeys =
+  ), [activeReport, analyses.mod, capacity, startDate, holidays, workingSaturdays, lineType, scheduleSettings, openingSequencedPreview, modUploadedAt, modStartSequence, modSkipKeys])
+  const releasedHoldKeys = useMemo(() => (
     activeReport === 'mod' && analyses.opening && analyses.mod
       ? buildReleasedHoldKeys(openingSequencedPreview.rows, sequencedPreview.rows)
       : new Set()
-  const previewWithReasons = applySkipHoldReasons(sequencedPreview, analysis, reasonConfig, releasedHoldKeys)
-  const openingPreviewWithReasons = applySkipHoldReasons(openingSequencedPreview, analyses.opening, reasonConfig)
+  ), [activeReport, analyses.opening, analyses.mod, openingSequencedPreview.rows, sequencedPreview.rows])
+  const previewWithReasons = useMemo(
+    () => applySkipHoldReasons(sequencedPreview, analysis, reasonConfig, releasedHoldKeys),
+    [sequencedPreview, analysis, reasonConfig, releasedHoldKeys],
+  )
+  const openingPreviewWithReasons = useMemo(
+    () => applySkipHoldReasons(openingSequencedPreview, analyses.opening, reasonConfig),
+    [openingSequencedPreview, analyses.opening, reasonConfig],
+  )
   const deferredPreviewRows = useDeferredValue(previewWithReasons.rows)
-  const currentDayStatusSummary = buildCurrentDayStatusSummary(previewWithReasons.rows, lineType, scheduleSettings)
-  const planSummary = buildPlanSummary(openingSequencedPreview.rows, analyses.opening?.previewColumns ?? [], lineType)
-  const inferenceCards = buildInference(sequencedPreview.rows, analysis?.summary?.shortage_parts ?? [], shortagePartNames)
-  const openingStatusSummary = buildCurrentDayStatusSummary(openingPreviewWithReasons.rows, lineType, scheduleSettings)
-  const openingInferenceCards = buildInference(openingPreviewWithReasons.rows, analyses.opening?.summary?.shortage_parts ?? [], shortagePartNames)
+  const currentDayStatusSummary = useMemo(
+    () => buildCurrentDayStatusSummary(previewWithReasons.rows, lineType, scheduleSettings),
+    [previewWithReasons.rows, lineType, scheduleSettings],
+  )
+  const planSummary = useMemo(
+    () => buildPlanSummary(openingSequencedPreview.rows, analyses.opening?.previewColumns ?? [], lineType),
+    [openingSequencedPreview.rows, analyses.opening?.previewColumns, lineType],
+  )
+  const inferenceCards = useMemo(
+    () => buildInference(sequencedPreview.rows, analysis?.summary?.shortage_parts ?? [], shortagePartDetails, sequencedPreview.taktTime),
+    [sequencedPreview.rows, analysis?.summary?.shortage_parts, shortagePartDetails, sequencedPreview.taktTime],
+  )
+  const openingStatusSummary = useMemo(
+    () => buildCurrentDayStatusSummary(openingPreviewWithReasons.rows, lineType, scheduleSettings),
+    [openingPreviewWithReasons.rows, lineType, scheduleSettings],
+  )
+  const openingInferenceCards = useMemo(
+    () => buildInference(openingPreviewWithReasons.rows, analyses.opening?.summary?.shortage_parts ?? [], shortagePartDetails, openingSequencedPreview.taktTime),
+    [openingPreviewWithReasons.rows, analyses.opening?.summary?.shortage_parts, shortagePartDetails, openingSequencedPreview.taktTime],
+  )
 
   useEffect(() => {
     if (!analysis || !resultsRef.current) {
@@ -2520,6 +3084,10 @@ function App() {
     }
     resultsRef.current.scrollIntoView({ behavior: 'smooth', block: 'start' })
   }, [analysis])
+
+  useEffect(() => {
+    criticalPartLookupCacheRef.current.clear()
+  }, [sevenDaysReportFile])
 
   useEffect(() => {
     let cancelled = false
@@ -2538,19 +3106,24 @@ function App() {
           setEngineStatusFile(workspace.engineStatusFile ?? null)
           setAxleStatusFile(workspace.axleStatusFile ?? null)
           setFrameStatusFile(workspace.frameStatusFile ?? null)
+          setRestoredFileNames(workspace.restoredFileNames ?? createEmptyRestoredFileNames())
           setCapacity(workspace.capacity ?? '')
           setStartDate(workspace.startDate ?? '')
           setScheduleSettings(workspace.scheduleSettings ?? createDefaultScheduleSettings(lineType))
           setShowSettings(false)
           setHolidayInput(workspace.holidayInput ?? '')
           setHolidays(Array.isArray(workspace.holidays) ? workspace.holidays : [])
+          setWorkingSaturdayInput(workspace.workingSaturdayInput ?? '')
+          setWorkingSaturdays(Array.isArray(workspace.workingSaturdays) ? workspace.workingSaturdays : [])
           setShortages(Array.isArray(workspace.shortages) && workspace.shortages.length ? workspace.shortages : [createShortageRow()])
           setAnalyses(workspace.analyses ?? { opening: null, mod: null })
           setActiveReport(workspace.activeReport ?? 'opening')
           setReasonConfig(workspace.reasonConfig ?? createReasonState())
           setCriticalParts(Array.isArray(workspace.criticalParts) ? workspace.criticalParts : [])
+          setResolvedCriticalParts(Array.isArray(workspace.resolvedCriticalParts) ? workspace.resolvedCriticalParts : [])
           setCriticalPartDraft(workspace.criticalPartDraft ?? createCriticalPartRow())
           setCriticalPartBulkInput(workspace.criticalPartBulkInput ?? '')
+          setCriticalL4Directory(Array.isArray(workspace.criticalL4Directory) ? workspace.criticalL4Directory : [])
         }
       })
       .catch(() => {
@@ -2574,7 +3147,7 @@ function App() {
 
     window.clearTimeout(workspaceSaveTimerRef.current)
     workspaceSaveTimerRef.current = window.setTimeout(() => {
-      writeWorkspace(lineType, {
+      writeWorkspace(lineType, getWorkspaceSnapshot({
         reportFiles,
         reportUploadedAt,
         modStartSequence,
@@ -2582,20 +3155,25 @@ function App() {
         engineStatusFile,
         axleStatusFile,
         frameStatusFile,
+        restoredFileNames,
         capacity,
         startDate,
         scheduleSettings,
         holidayInput,
         holidays,
+        workingSaturdayInput,
+        workingSaturdays,
         shortages,
         analyses,
         activeReport,
         reasonConfig,
         criticalParts,
+        resolvedCriticalParts,
         criticalPartDraft,
         criticalPartBulkInput,
-        savedAt: new Date().toISOString(),
-      }).catch(() => {
+        criticalL4Directory,
+        lineType,
+      })).catch(() => {
         pushToast('Workspace could not be saved in this browser.', 'warning')
       })
     }, 500)
@@ -2603,7 +3181,11 @@ function App() {
     return () => {
       window.clearTimeout(workspaceSaveTimerRef.current)
     }
-  }, [lineType, reportFiles, reportUploadedAt, modStartSequence, sevenDaysReportFile, engineStatusFile, axleStatusFile, frameStatusFile, capacity, startDate, scheduleSettings, holidayInput, holidays, shortages, analyses, activeReport, reasonConfig, criticalParts, criticalPartDraft, criticalPartBulkInput])
+  }, [lineType, reportFiles, reportUploadedAt, modStartSequence, sevenDaysReportFile, engineStatusFile, axleStatusFile, frameStatusFile, restoredFileNames, capacity, startDate, scheduleSettings, holidayInput, holidays, workingSaturdayInput, workingSaturdays, shortages, analyses, activeReport, reasonConfig, criticalParts, resolvedCriticalParts, criticalPartDraft, criticalPartBulkInput, criticalL4Directory])
+
+  useEffect(() => {
+    refreshConstraintBackups({ silent: true })
+  }, [])
 
   function pushToast(message, type = 'danger') {
     toastCounterRef.current += 1
@@ -2618,36 +3200,14 @@ function App() {
     setToasts((current) => current.filter((toast) => toast.id !== id))
   }
 
-  function updateShortage(id, patch) {
-    setShortages((current) =>
-      current.map((row) => (row.id === id ? { ...row, ...patch } : row)),
-    )
-  }
-
-  function addShortage() {
-    setShortages((current) => [...current, createShortageRow()])
-  }
-
-  function addShortageFiles(fileList) {
-    const files = Array.from(fileList ?? [])
-    if (files.length === 0) {
-      return
-    }
-
-    setShortages((current) => {
-      const existingRows = current.filter((row) => row.file || row.partName || row.ref || row.qty)
-      return [...existingRows, ...files.map((file) => createShortageRow(file))]
-    })
-  }
-
-  function updateShortageFile(id, file) {
-    updateShortage(id, {
-      file,
-      part: file ? getPartNumberFromFileName(file.name) : '',
-    })
-  }
-
   function updateReportFile(reportKey, file) {
+    setRestoredFileNames((current) => ({
+      ...current,
+      reports: {
+        ...current.reports,
+        [reportKey]: file ? file.name : '',
+      },
+    }))
     setReportFiles((current) => ({
       ...current,
       [reportKey]: file,
@@ -2670,33 +3230,29 @@ function App() {
 
   function updateSevenDaysReportFile(file) {
     setSevenDaysReportFile(file)
+    setRestoredFileNames((current) => ({ ...current, sevenDaysReportFile: file ? file.name : '' }))
+    setCriticalL4Directory([])
   }
 
   function updateEngineStatusFile(file) {
     setEngineStatusFile(file)
+    setRestoredFileNames((current) => ({ ...current, engineStatusFile: file ? file.name : '' }))
     setAnalyses({ opening: null, mod: null })
     setActiveReport('opening')
   }
 
   function updateAxleStatusFile(file) {
     setAxleStatusFile(file)
+    setRestoredFileNames((current) => ({ ...current, axleStatusFile: file ? file.name : '' }))
     setAnalyses({ opening: null, mod: null })
     setActiveReport('opening')
   }
 
   function updateFrameStatusFile(file) {
     setFrameStatusFile(file)
+    setRestoredFileNames((current) => ({ ...current, frameStatusFile: file ? file.name : '' }))
     setAnalyses({ opening: null, mod: null })
     setActiveReport('opening')
-  }
-
-  function removeShortage(id) {
-    setShortages((current) => {
-      if (current.length === 1) {
-        return [createShortageRow()]
-      }
-      return current.filter((row) => row.id !== id)
-    })
   }
 
   function addHoliday() {
@@ -2704,11 +3260,46 @@ function App() {
       return
     }
     setHolidays((current) => [...current, holidayInput].sort())
+    setWorkingSaturdays((current) => current.filter((dateKey) => dateKey !== holidayInput))
     setHolidayInput('')
   }
 
   function removeHoliday(dateKey) {
     setHolidays((current) => current.filter((holiday) => holiday !== dateKey))
+  }
+
+  function addWorkingSaturday() {
+    if (!workingSaturdayInput || workingSaturdays.includes(workingSaturdayInput)) {
+      return
+    }
+
+    const selectedDate = new Date(`${workingSaturdayInput}T00:00:00`)
+    if (selectedDate.getDay() !== 6) {
+      pushToast('Select a Saturday to mark it as working.', 'warning')
+      return
+    }
+
+    if (holidays.includes(workingSaturdayInput)) {
+      pushToast('Remove this date from excluded holidays before marking it as a working Saturday.', 'warning')
+      return
+    }
+
+    setWorkingSaturdays((current) => [...current, workingSaturdayInput].sort())
+    setWorkingSaturdayInput('')
+  }
+
+  function removeWorkingSaturday(dateKey) {
+    setWorkingSaturdays((current) => current.filter((workingSaturday) => workingSaturday !== dateKey))
+  }
+
+  function toggleWorkingSaturday(dateKey, isWorking) {
+    if (isWorking) {
+      setWorkingSaturdays((current) => (current.includes(dateKey) ? current : [...current, dateKey].sort()))
+      setHolidays((current) => current.filter((holiday) => holiday !== dateKey))
+      return
+    }
+
+    setWorkingSaturdays((current) => current.filter((workingSaturday) => workingSaturday !== dateKey))
   }
 
   function updateNumberOfShifts(value) {
@@ -2748,6 +3339,7 @@ function App() {
     setEngineStatusFile(null)
     setAxleStatusFile(null)
     setFrameStatusFile(null)
+    setRestoredFileNames(createEmptyRestoredFileNames())
     setDragActiveReport(null)
     setCapacity('')
     setStartDate('')
@@ -2755,15 +3347,28 @@ function App() {
     setShowSettings(false)
     setHolidayInput('')
     setHolidays([])
+    setWorkingSaturdayInput('')
+    setWorkingSaturdays([])
     setShortages([createShortageRow()])
     setAnalyses({ opening: null, mod: null })
     setActiveReport('opening')
     setReasonConfig(createReasonState())
     setCriticalParts([])
+    setResolvedCriticalParts([])
     setCriticalPartDraft(createCriticalPartRow())
     setCriticalPartBulkInput('')
+    setCriticalPartBulkVariantFiles([])
     setCriticalLookupLoading(false)
+    setCriticalL4Directory([])
     setToasts([])
+  }
+
+  function confirmResetAll() {
+    const confirmed = window.confirm('Reset all uploaded reports and planner inputs? This cannot be undone.')
+    if (!confirmed) {
+      return
+    }
+    resetAll()
   }
 
   function updateReasonBucket(kind, updater) {
@@ -2848,6 +3453,15 @@ function App() {
     setCriticalPartDraft((current) => ({ ...current, ...patch }))
   }
 
+  function updateCriticalPartDraftVariantFile(file) {
+    setCriticalPartDraft((current) => ({
+      ...current,
+      variantFile: file,
+      variantFileName: file?.name ?? '',
+      partNumber: current.partNumber || (file ? getPartNumberFromFileName(file.name) : ''),
+    }))
+  }
+
   function parseCriticalPartNumbers(value) {
     return [...new Set(
       String(value ?? '')
@@ -2861,8 +3475,52 @@ function App() {
     setCriticalParts((current) => current.map((part) => (part.id === id ? { ...part, ...patch } : part)))
   }
 
-  function removeCriticalPart(id) {
-    setCriticalParts((current) => current.filter((part) => part.id !== id))
+  function updateCriticalPartVariantFile(id, file) {
+    setCriticalParts((current) => current.map((part) => (
+      part.id === id
+        ? {
+            ...part,
+            variantFile: file,
+            variantFileName: file?.name ?? '',
+            partNumber: part.partNumber || (file ? getPartNumberFromFileName(file.name) : ''),
+          }
+        : part
+    )))
+  }
+
+  async function removeCriticalPart(id) {
+    const partToResolve = criticalParts.find((part) => part.id === id)
+    if (!partToResolve) {
+      return
+    }
+
+    const partLabel = partToResolve.partNumber || 'this part'
+    const confirmed = window.confirm(`Is the critical part issue resolved for ${partLabel}? This will remove its mapping from Data preview and Shortage impact analysis.`)
+    if (!confirmed) {
+      return
+    }
+
+    const removedPartNumber = normalizeCriticalPartNumber(partToResolve.partNumber)
+    const nextParts = criticalParts.filter((part) => part.id !== id)
+    const resolvedPart = {
+      ...partToResolve,
+      variantFile: null,
+      variantFileName: partToResolve.variantFile?.name ?? partToResolve.variantFileName ?? '',
+      resolvedAt: new Date().toISOString(),
+    }
+
+    setCriticalParts(nextParts)
+    setResolvedCriticalParts((current) => [resolvedPart, ...current])
+    setAnalyses((current) => ({
+      opening: removeCriticalPartFromAnalysisData(current.opening, [removedPartNumber]),
+      mod: removeCriticalPartFromAnalysisData(current.mod, [removedPartNumber]),
+    }))
+    pushToast(`Resolved ${partLabel}. Removed its shortage mapping from the current analysis.`, 'success')
+
+    const remainingMappedParts = buildShortagesFromCriticalParts(nextParts)
+    if (reportFiles.opening && remainingMappedParts.length > 0) {
+      await refreshImpactAnalysisFromCriticalParts(nextParts)
+    }
   }
 
   async function lookupCriticalPartDetails(partNumber, { silent = false } = {}) {
@@ -2877,6 +3535,16 @@ function App() {
       return null
     }
 
+    const cacheKey = [
+      normalizedPartNumber,
+      sevenDaysReportFile.name,
+      sevenDaysReportFile.size,
+      sevenDaysReportFile.lastModified,
+    ].join('|')
+    if (criticalPartLookupCacheRef.current.has(cacheKey)) {
+      return criticalPartLookupCacheRef.current.get(cacheKey)
+    }
+
     const formData = new FormData()
     formData.append('part_number', normalizedPartNumber)
     formData.append('seven_days_report_file', sevenDaysReportFile)
@@ -2888,12 +3556,69 @@ function App() {
       if (!response.ok || result.error) {
         throw new Error(result.error || 'Part details could not be found.')
       }
+      criticalPartLookupCacheRef.current.set(cacheKey, result)
       return result
     } catch (error) {
       if (!silent) {
         pushToast(`Part lookup failed: ${error.message}`, 'warning')
       }
       return null
+    } finally {
+      setCriticalLookupLoading(false)
+    }
+  }
+
+  async function lookupCriticalPartDetailsBulk(partNumbers, { silent = false } = {}) {
+    const normalizedPartNumbers = [...new Set(partNumbers.map(normalizeCriticalPartNumber).filter(Boolean))]
+    if (!normalizedPartNumbers.length) {
+      return { parts: [], missing: [] }
+    }
+    if (!sevenDaysReportFile) {
+      if (!silent) {
+        pushToast('Upload the 7 days report before looking up critical part details.', 'warning')
+      }
+      return { parts: [], missing: normalizedPartNumbers }
+    }
+
+    const cacheKeyPrefix = [
+      sevenDaysReportFile.name,
+      sevenDaysReportFile.size,
+      sevenDaysReportFile.lastModified,
+    ].join('|')
+    const cachedParts = normalizedPartNumbers.map((partNumber) =>
+      criticalPartLookupCacheRef.current.get(`${partNumber}|${cacheKeyPrefix}`),
+    )
+    if (cachedParts.every(Boolean)) {
+      return { parts: cachedParts, missing: [] }
+    }
+
+    const formData = new FormData()
+    formData.append('part_numbers', JSON.stringify(normalizedPartNumbers))
+    formData.append('seven_days_report_file', sevenDaysReportFile)
+
+    setCriticalLookupLoading(true)
+    try {
+      const response = await fetch('/api/critical-part-details', { method: 'POST', body: formData })
+      const result = await response.json()
+      if (!response.ok || result.error) {
+        throw new Error(result.error || 'Part details could not be found.')
+      }
+      const parts = Array.isArray(result.parts) ? result.parts : []
+      parts.forEach((part) => {
+        const normalizedPartNumber = normalizeCriticalPartNumber(part?.partNumber)
+        if (normalizedPartNumber) {
+          criticalPartLookupCacheRef.current.set(`${normalizedPartNumber}|${cacheKeyPrefix}`, part)
+        }
+      })
+      return {
+        parts,
+        missing: Array.isArray(result.missing) ? result.missing : [],
+      }
+    } catch (error) {
+      if (!silent) {
+        pushToast(`Part lookup failed: ${error.message}`, 'warning')
+      }
+      return { parts: [], missing: normalizedPartNumbers }
     } finally {
       setCriticalLookupLoading(false)
     }
@@ -2910,50 +3635,181 @@ function App() {
     }
   }
 
+  async function refreshImpactAnalysisFromCriticalParts(partsForAnalysis) {
+    const mappedShortages = buildShortagesFromCriticalParts(partsForAnalysis)
+    if (!mappedShortages.length) {
+      pushToast('Add a variant file to at least one critical part before updating impact analysis.', 'warning')
+      return
+    }
+    await runAnalysis({
+      preserveActiveReport: true,
+      shortagesOverride: mappedShortages,
+    })
+  }
+
   async function addCriticalPart() {
     const normalizedPartNumber = normalizeCriticalPartNumber(criticalPartDraft.partNumber)
     if (!normalizedPartNumber) {
       pushToast('Enter a part number before adding critical part details.', 'warning')
       return
     }
-
-    const details = await lookupCriticalPartDetails(normalizedPartNumber, {
-      silent: Boolean(criticalPartDraft.partDescription || criticalPartDraft.vendorName || criticalPartDraft.pmcName || criticalPartDraft.l4Name),
-    })
+    const details = hasCriticalPartLookupDetails(criticalPartDraft)
+      ? null
+      : await lookupCriticalPartDetails(normalizedPartNumber, {
+          silent: Boolean(criticalPartDraft.partDescription || criticalPartDraft.vendorName || criticalPartDraft.pmcName || criticalPartDraft.l4Name),
+        })
     const nextPart = {
       ...criticalPartDraft,
       ...(details ?? {}),
       partNumber: details?.partNumber || normalizedPartNumber,
       id: createCriticalPartRow().id,
     }
-    setCriticalParts((current) => [...current, nextPart])
+    const nextParts = [...criticalParts, nextPart]
+    setCriticalParts(nextParts)
     setCriticalPartDraft(createCriticalPartRow())
+    if (nextPart.variantFile && reportFiles.opening) {
+      await refreshImpactAnalysisFromCriticalParts(nextParts)
+    } else if (nextPart.variantFile && !reportFiles.opening) {
+      pushToast('Critical part added. Upload the Opening Report to update impact analysis.', 'warning')
+    }
   }
 
   async function addBulkCriticalParts() {
-    const partNumbers = parseCriticalPartNumbers(criticalPartBulkInput)
+    const pastedPartNumbers = parseCriticalPartNumbers(criticalPartBulkInput)
+    const filePartNumbers = criticalPartBulkVariantFiles
+      .map((file) => normalizeCriticalPartNumber(getPartNumberFromFileName(file.name)))
+      .filter(Boolean)
+    const partNumbers = [...new Set([...pastedPartNumbers, ...filePartNumbers])]
+
     if (!partNumbers.length) {
-      pushToast('Paste at least one part number before adding critical part details.', 'warning')
-      return
-    }
-    if (!sevenDaysReportFile) {
-      pushToast('Upload the 7 days report before adding pasted part details.', 'warning')
+      pushToast('Paste part numbers or upload connecting variant files before adding critical part details.', 'warning')
       return
     }
 
-    const addedParts = []
-    for (const partNumber of partNumbers) {
-      const details = await lookupCriticalPartDetails(partNumber, { silent: true })
-      addedParts.push({
+    const lookup = sevenDaysReportFile
+      ? await lookupCriticalPartDetailsBulk(partNumbers, { silent: true })
+      : { parts: [], missing: partNumbers }
+    const addedParts = partNumbers.map((partNumber, index) => {
+      const details = lookup.parts[index]
+      const variantFile = getVariantFileForPart(partNumber, criticalPartBulkVariantFiles, index, partNumbers.length)
+      return {
         ...createCriticalPartRow(),
         ...(details ?? {}),
         partNumber: details?.partNumber || partNumber,
-      })
+        variantFile,
+        variantFileName: variantFile?.name ?? '',
+      }
+    })
+
+    const nextParts = [...criticalParts, ...addedParts]
+    setCriticalParts(nextParts)
+    setCriticalPartBulkInput('')
+    setCriticalPartBulkVariantFiles([])
+    pushToast(
+      `Added ${addedParts.length} critical part${addedParts.length === 1 ? '' : 's'}${lookup.missing.length && sevenDaysReportFile ? ` (${lookup.missing.length} not found in 7 days report)` : ''}.`,
+      lookup.missing.length && sevenDaysReportFile ? 'warning' : 'success',
+    )
+    if (addedParts.some((part) => part.variantFile) && reportFiles.opening) {
+      await refreshImpactAnalysisFromCriticalParts(nextParts)
+    } else if (addedParts.some((part) => part.variantFile)) {
+      pushToast('Critical parts added. Upload the Opening Report to update impact analysis.', 'warning')
+    }
+  }
+
+  async function refreshConstraintBackups(options = {}) {
+    setBackupLoading(true)
+    try {
+      const response = await fetch('/api/constraint-backups')
+      const result = await response.json()
+      if (!response.ok || result.error) {
+        throw new Error(result.error || 'Saved backups could not be loaded.')
+      }
+      setConstraintBackups(Array.isArray(result.backups) ? result.backups : [])
+    } catch (error) {
+      if (!options.silent) {
+        pushToast(`Restore list failed: ${error.message}`, 'danger')
+      }
+    } finally {
+      setBackupLoading(false)
+    }
+  }
+
+  function applyRestoredWorkspaceState(workspaceState = {}) {
+    const restoredNames = workspaceState.restoredFileNames ?? createEmptyRestoredFileNames()
+    const restoredActiveReport = workspaceState.activeReport ?? 'opening'
+
+    setReportFiles({ opening: null, mod: null })
+    setReportUploadedAt(workspaceState.reportUploadedAt ?? { opening: null, mod: null })
+    setSevenDaysReportFile(null)
+    setEngineStatusFile(null)
+    setAxleStatusFile(null)
+    setFrameStatusFile(null)
+    setRestoredFileNames(restoredNames)
+    setCapacity(workspaceState.capacity ?? '')
+    setStartDate(workspaceState.startDate ?? '')
+    setScheduleSettings(workspaceState.scheduleSettings ?? createDefaultScheduleSettings(lineType))
+    setHolidayInput(workspaceState.holidayInput ?? '')
+    setHolidays(Array.isArray(workspaceState.holidays) ? workspaceState.holidays : [])
+    setWorkingSaturdayInput(workspaceState.workingSaturdayInput ?? '')
+    setWorkingSaturdays(Array.isArray(workspaceState.workingSaturdays) ? workspaceState.workingSaturdays : [])
+    setShortages(Array.isArray(workspaceState.shortages) && workspaceState.shortages.length
+      ? workspaceState.shortages.map((shortage) => ({ ...shortage, file: null }))
+      : [createShortageRow()])
+    setReasonConfig(workspaceState.reasonConfig ?? createReasonState())
+    setCriticalParts(Array.isArray(workspaceState.criticalParts) ? workspaceState.criticalParts : [])
+    setResolvedCriticalParts(Array.isArray(workspaceState.resolvedCriticalParts) ? workspaceState.resolvedCriticalParts : [])
+    setCriticalPartDraft(workspaceState.criticalPartDraft ?? createCriticalPartRow())
+    setCriticalPartBulkInput(workspaceState.criticalPartBulkInput ?? '')
+    setCriticalL4Directory(Array.isArray(workspaceState.criticalL4Directory) ? workspaceState.criticalL4Directory : [])
+    setModStartSequence(workspaceState.modStartSequence ?? '')
+    setActiveReport(restoredActiveReport)
+  }
+
+  async function restoreConstraintBackup(backupId) {
+    if (!backupId) {
+      return
     }
 
-    setCriticalParts((current) => [...current, ...addedParts])
-    setCriticalPartBulkInput('')
-    pushToast(`Added ${addedParts.length} pasted part${addedParts.length === 1 ? '' : 's'}.`, 'success')
+    setRestoringBackupId(backupId)
+    try {
+      const response = await fetch(`/api/constraint-backups/${encodeURIComponent(backupId)}`)
+      const result = await response.json()
+      if (!response.ok || result.error) {
+        throw new Error(result.error || 'Backup could not be restored.')
+      }
+
+      const workspaceState = result.workspace_state ?? {}
+      const hasSavedPlannerState = Boolean(result.backup?.has_session_state)
+      const restoreColumns = hasSavedPlannerState ? getBasePreviewColumns(result.mapped_columns) : (result.mapped_columns ?? [])
+      const restoreRows = hasSavedPlannerState ? getBasePreviewRows(result.mapped_rows) : (result.mapped_rows ?? [])
+      const restoredAnalyses = workspaceState.analyses ?? {
+        opening: {
+          summary: result.summary ?? {},
+          gaps: [],
+          holdOrders: [],
+          skipOrders: [],
+          previewColumns: restoreColumns,
+          previewData: restoreRows,
+        },
+        mod: null,
+      }
+      const restoredActiveReport = workspaceState.activeReport ?? 'opening'
+      const nextActiveReport =
+        restoredActiveReport === 'plan' || restoredActiveReport === 'critical' || restoredAnalyses[restoredActiveReport]
+          ? restoredActiveReport
+          : 'opening'
+
+      applyRestoredWorkspaceState(workspaceState)
+      setAnalyses(restoredAnalyses)
+      setActiveReport(nextActiveReport)
+      setShowLanding(false)
+      setShowSettings(false)
+      pushToast(`Restored saved constraints from ${result.backup?.id ?? backupId}.`, 'success')
+    } catch (error) {
+      pushToast(`Restore failed: ${error.message}`, 'danger')
+    } finally {
+      setRestoringBackupId('')
+    }
   }
 
   async function saveConstraintsBackup() {
@@ -2967,12 +3823,42 @@ function App() {
       : openingPreviewWithReasons.columns
     const mappedCsv = buildCsvText(mappedColumns, openingPreviewWithReasons.rows)
     const formData = new FormData()
+    const workspaceSnapshot = getWorkspaceSnapshot({
+      reportFiles,
+      reportUploadedAt,
+      modStartSequence,
+      sevenDaysReportFile,
+      engineStatusFile,
+      axleStatusFile,
+      frameStatusFile,
+      restoredFileNames,
+      capacity,
+      startDate,
+      scheduleSettings,
+      holidayInput,
+      holidays,
+      workingSaturdayInput,
+      workingSaturdays,
+      shortages,
+      analyses,
+      activeReport,
+      reasonConfig,
+      criticalParts,
+      resolvedCriticalParts,
+      criticalPartDraft,
+      criticalPartBulkInput,
+      criticalL4Directory,
+      lineType,
+    })
+
     formData.append('line_type', lineType)
     formData.append('mapped_columns', JSON.stringify(mappedColumns))
     formData.append('mapped_report_file', new Blob([mappedCsv], { type: 'text/csv;charset=utf-8;' }), 'Mapped_Day_Opening_Report.csv')
     formData.append('summary', JSON.stringify(analyses.opening.summary ?? {}))
     formData.append('status_summary', JSON.stringify(openingStatusSummary))
     formData.append('inference_cards', JSON.stringify(openingInferenceCards))
+    formData.append('chart_images', JSON.stringify(captureBackupChartImages()))
+    formData.append('workspace_state', JSON.stringify(getSerializableWorkspaceSnapshot(workspaceSnapshot)))
 
     if (reportFiles.opening) {
       formData.append('opening_report_file', reportFiles.opening)
@@ -2989,10 +3875,10 @@ function App() {
     if (axleStatusFile) {
       formData.append('axle_status_file', axleStatusFile)
     }
-    if (lineType === 'HDT' && frameStatusFile) {
+    if (frameStatusFile) {
       formData.append('frame_status_file', frameStatusFile)
     }
-    for (const shortage of shortages) {
+    for (const shortage of activeShortages) {
       if (shortage.file) {
         formData.append('shortage_files', shortage.file)
       }
@@ -3011,6 +3897,7 @@ function App() {
       if (!response.ok || result.error) {
         throw new Error(result.error || 'Backup could not be saved.')
       }
+      refreshConstraintBackups({ silent: true })
       pushToast(`Constraints backup saved: ${result.folder}`, 'success')
     } catch (error) {
       pushToast(`Save failed: ${error.message}`, 'danger')
@@ -3029,7 +3916,7 @@ function App() {
     if (axleStatusFile) {
       formData.append('axle_status_file', axleStatusFile)
     }
-    if (lineType === 'HDT' && frameStatusFile) {
+    if (frameStatusFile) {
       formData.append('frame_status_file', frameStatusFile)
     }
 
@@ -3037,7 +3924,8 @@ function App() {
       formData.append('opening_hold_keys', key)
     }
 
-    for (const shortage of shortages) {
+    const shortagesForAnalysis = options.shortagesOverride ?? activeShortages
+    for (const shortage of shortagesForAnalysis) {
       if (shortage.part.trim() && shortage.file) {
         formData.append('shortage_parts', shortage.part.trim())
         formData.append('shortage_refs', shortage.ref.trim())
@@ -3059,7 +3947,8 @@ function App() {
     return normalizeData(raw)
   }
 
-  async function runAnalysis() {
+  async function runAnalysis(options = {}) {
+    const shortagesForAnalysis = options.shortagesOverride ?? activeShortages
     if (!reportFiles.opening) {
       pushToast('Action blocked: please upload the opening report first.', 'warning')
       return
@@ -3068,11 +3957,14 @@ function App() {
     setLoading(true)
     try {
       const nextAnalyses = {}
-      nextAnalyses.opening = await analyzeReport(reportFiles.opening)
+      nextAnalyses.opening = await analyzeReport(reportFiles.opening, {
+        shortagesOverride: shortagesForAnalysis,
+      })
 
       if (reportFiles.mod) {
         nextAnalyses.mod = await analyzeReport(reportFiles.mod, {
           openingHoldKeys: buildOpeningHoldKeys(nextAnalyses.opening.previewData ?? []),
+          shortagesOverride: shortagesForAnalysis,
         })
       }
 
@@ -3081,7 +3973,7 @@ function App() {
           ...current,
           ...nextAnalyses,
         }))
-        setActiveReport(nextAnalyses.mod ? 'mod' : 'opening')
+        setActiveReport((current) => (options.preserveActiveReport ? current : nextAnalyses.mod ? 'mod' : 'opening'))
       })
     } catch (error) {
       pushToast(`Network error: ${error.message}`, 'danger')
@@ -3134,6 +4026,9 @@ function App() {
     analysis?.summary?.skip_region_stratification?.Domestic || 0,
     analysis?.summary?.skip_region_stratification?.Export || 0,
   ]
+  const lineConstraintBackups = constraintBackups.filter((backup) => (backup.line_type ?? lineType) === lineType)
+  const latestConstraintBackup = lineConstraintBackups[0] ?? null
+  const shouldShowWorkspace = Boolean(analysis) || activeReport === 'critical'
 
   if (showLanding) {
     return <LandingPage onEnter={() => setShowLanding(false)} />
@@ -3174,25 +4069,70 @@ function App() {
             <h2>{LINE_TYPES[lineType].title} Sequence Analyser</h2>
             <p>{LINE_TYPES[lineType].description}</p>
           </div>
-          <div className="line-type-actions" role="group" aria-label="Select HDT or MDT">
-            {Object.keys(LINE_TYPES).map((type) => (
-              <a
-                key={type}
-                className={`line-type-button ${lineType === type ? 'active' : ''}`}
-                href={lineType === type ? undefined : getLineTabUrl(type)}
-                target={lineType === type ? undefined : '_blank'}
-                rel={lineType === type ? undefined : 'noreferrer'}
-                aria-pressed={lineType === type}
-                aria-current={lineType === type ? 'page' : undefined}
-                onClick={(event) => {
-                  if (lineType === type) {
-                    event.preventDefault()
-                  }
-                }}
+          <div className="line-panel-actions">
+            <div className="line-type-actions" role="group" aria-label="Select HDT or MDT">
+              {Object.keys(LINE_TYPES).map((type) => (
+                <a
+                  key={type}
+                  className={`line-type-button ${lineType === type ? 'active' : ''}`}
+                  href={lineType === type ? undefined : getLineTabUrl(type)}
+                  target={lineType === type ? undefined : '_blank'}
+                  rel={lineType === type ? undefined : 'noreferrer'}
+                  aria-pressed={lineType === type}
+                  aria-current={lineType === type ? 'page' : undefined}
+                  onClick={(event) => {
+                    if (lineType === type) {
+                      event.preventDefault()
+                    }
+                  }}
+                >
+                  {type}
+                </a>
+              ))}
+            </div>
+            <div className="restore-session-actions">
+              <span className="restore-session-label">Session</span>
+              <button
+                className="btn btn-sm btn-outline-primary fw-semibold"
+                type="button"
+                onClick={() => refreshConstraintBackups()}
+                disabled={backupLoading}
+                title="Refresh saved local backups"
               >
-                {type}
-              </a>
-            ))}
+                {backupLoading ? (
+                  <span className="spinner-border spinner-border-sm" role="status" aria-hidden="true" />
+                ) : (
+                  <i className="bi bi-arrow-clockwise" />
+                )}
+              </button>
+              <button
+                className="btn btn-sm btn-primary fw-semibold"
+                type="button"
+                onClick={() => restoreConstraintBackup(latestConstraintBackup?.id)}
+                disabled={!latestConstraintBackup || Boolean(restoringBackupId)}
+              >
+                {restoringBackupId === latestConstraintBackup?.id ? (
+                  <span className="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true" />
+                ) : (
+                  <i className="bi bi-clock-history me-1" />
+                )}
+                Restore last saved
+              </button>
+              <select
+                className="form-select form-select-sm restore-session-select"
+                value=""
+                onChange={(event) => restoreConstraintBackup(event.target.value)}
+                disabled={!lineConstraintBackups.length || Boolean(restoringBackupId)}
+                aria-label="Restore saved constraint backup"
+              >
+                <option value="">Saved sessions</option>
+                {lineConstraintBackups.map((backup) => (
+                  <option key={backup.id} value={backup.id}>
+                    {backup.id} - {formatBackupTime(backup.updated_at)}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
         </section>
 
@@ -3204,57 +4144,93 @@ function App() {
                   <i className="bi bi-1-circle-fill" /> Step 1: Sequence config
                 </span>
               </div>
-              <div className="step-body">
-                <label className="form-label fw-semibold small">Daily Capacity</label>
-                <div className="input-group input-group-sm mb-3">
-                  <span className="input-group-text">
-                    <i className="bi bi-123" />
-                  </span>
-                  <input
-                    type="number"
-                    className="form-control"
-                    min="1"
-                    placeholder="Enter daily capacity"
-                    value={capacity}
-                    onChange={(event) => setCapacity(event.target.value)}
-                  />
-                </div>
+              <div className="step-body sequence-config-body">
+                <div className="sequence-config-grid">
+                  <div>
+                    <label className="form-label fw-semibold small">Daily Capacity</label>
+                    <div className="input-group input-group-sm">
+                      <span className="input-group-text">
+                        <i className="bi bi-123" />
+                      </span>
+                      <input
+                        type="number"
+                        className="form-control"
+                        min="1"
+                        placeholder="Enter daily capacity"
+                        value={capacity}
+                        onChange={(event) => setCapacity(event.target.value)}
+                      />
+                    </div>
+                  </div>
 
-                <label className="form-label fw-semibold small">Start Date</label>
-                <div className="input-group input-group-sm mb-3">
-                  <span className="input-group-text">
-                    <i className="bi bi-calendar-date" />
-                  </span>
-                  <input
-                    type="date"
-                    className="form-control"
-                    value={startDate}
-                    onChange={(event) => setStartDate(event.target.value)}
-                  />
-                </div>
+                  <div>
+                    <label className="form-label fw-semibold small">Start Date</label>
+                    <div className="input-group input-group-sm">
+                      <span className="input-group-text">
+                        <i className="bi bi-calendar-date" />
+                      </span>
+                      <input
+                        type="date"
+                        className="form-control"
+                        value={startDate}
+                        onChange={(event) => setStartDate(event.target.value)}
+                      />
+                    </div>
+                  </div>
 
-                <label className="form-label fw-semibold small">Exclude Holidays</label>
-                <div className="input-group input-group-sm">
-                  <input
-                    type="date"
-                    className="form-control"
-                    value={holidayInput}
-                    onChange={(event) => setHolidayInput(event.target.value)}
-                  />
-                  <button className="btn btn-outline-secondary" type="button" onClick={addHoliday}>
-                    <i className="bi bi-plus-lg" />
-                  </button>
-                </div>
-
-                <div className="holiday-list">
-                  {holidays.map((holiday) => (
-                    <span key={holiday} className="badge holiday-chip">
-                      {holiday}
-                      <button type="button" className="chip-dismiss" onClick={() => removeHoliday(holiday)}>
-                        <i className="bi bi-x-circle" />
+                  <div>
+                    <label className="form-label fw-semibold small">Exclude Holidays</label>
+                    <div className="input-group input-group-sm">
+                      <input
+                        type="date"
+                        className="form-control"
+                        value={holidayInput}
+                        onChange={(event) => setHolidayInput(event.target.value)}
+                      />
+                      <button className="btn btn-outline-secondary" type="button" onClick={addHoliday}>
+                        <i className="bi bi-plus-lg" />
                       </button>
-                    </span>
-                  ))}
+                    </div>
+
+                    <div className="holiday-list">
+                      {holidays.map((holiday) => (
+                        <span key={holiday} className="badge holiday-chip">
+                          {holiday}
+                          <button type="button" className="chip-dismiss" onClick={() => removeHoliday(holiday)}>
+                            <i className="bi bi-x-circle" />
+                          </button>
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="form-label fw-semibold small">Working Saturdays</label>
+                    <div className="working-saturday-list">
+                      {upcomingSaturdays.length ? (
+                        upcomingSaturdays.map((date) => {
+                          const dateKey = formatDateKey(date)
+                          return (
+                            <label key={dateKey} className="working-saturday-option">
+                              <input
+                                type="checkbox"
+                                className="form-check-input"
+                                checked={workingSaturdays.includes(dateKey)}
+                                onChange={(event) => toggleWorkingSaturday(dateKey, event.target.checked)}
+                              />
+                              <span>{formatCalendarLabel(date)}</span>
+                            </label>
+                          )
+                        })
+                      ) : (
+                        <span className="form-text">No Saturdays occur in the next 10 days.</span>
+                      )}
+                    </div>
+
+                    <p className="form-text mb-0 mt-1">
+                      Is this Saturday working day?
+                    </p>
+                  </div>
                 </div>
 
                 <div className="config-note">
@@ -3269,124 +4245,20 @@ function App() {
             </div>
           </div>
 
-          <div className="col-xl-4">
-            <div className="step-card h-100">
-              <div className="step-header with-action">
-                <span>
-                  <i className="bi bi-2-circle-fill" /> Step 2: Part shortages
-                </span>
-                <button className="btn btn-sm btn-outline-primary" type="button" onClick={addShortage}>
-                  <i className="bi bi-plus" /> Add Row
-                </button>
-              </div>
-              <div className="step-body shortage-stack">
-                <p className="step-copy">{shortageIntro}</p>
-                <label htmlFor={shortageBatchInputId} className="multi-upload-zone">
-                  <i className="bi bi-files" />
-                  <span>Upload one or more variant files</span>
-                </label>
-                <input
-                  id={shortageBatchInputId}
-                  type="file"
-                  accept=".xlsx,.xls,.csv"
-                  multiple
-                  className="visually-hidden"
-                  onChange={(event) => {
-                    addShortageFiles(event.target.files)
-                    event.target.value = ''
-                  }}
-                />
-                {shortages.map((shortage) => (
-                  <div key={shortage.id} className="shortage-card">
-                    <div className="row g-2">
-                      <div className="col-sm-6">
-                        <label className="form-label small fw-semibold">Part No. from file</label>
-                        <input
-                          type="text"
-                          className="form-control form-control-sm"
-                          value={shortage.part}
-                          placeholder="Upload a file"
-                          readOnly
-                        />
-                      </div>
-                      <div className="col-sm-6">
-                        <label className="form-label small fw-semibold">Part Name</label>
-                        <input
-                          type="text"
-                          className="form-control form-control-sm"
-                          value={shortage.partName}
-                          placeholder="Enter part name"
-                          onChange={(event) => updateShortage(shortage.id, { partName: event.target.value })}
-                        />
-                      </div>
-                      <div className="col-sm-6">
-                        <label className="form-label small fw-semibold">Reference Order</label>
-                        <input
-                          type="text"
-                          className="form-control form-control-sm"
-                          value={shortage.ref}
-                          onChange={(event) => updateShortage(shortage.id, { ref: event.target.value })}
-                        />
-                      </div>
-                      <div className="col-sm-3">
-                        <label className="form-label small fw-semibold">Qty</label>
-                        <input
-                          type="number"
-                          min="0"
-                          className="form-control form-control-sm"
-                          value={shortage.qty}
-                          onChange={(event) => updateShortage(shortage.id, { qty: event.target.value })}
-                        />
-                      </div>
-                      <div className="col-sm-3">
-                        <label className="form-label small fw-semibold">Usage / vehicle</label>
-                        <input
-                          type="number"
-                          min="1"
-                          step="1"
-                          className="form-control form-control-sm"
-                          value={shortage.usage ?? '1'}
-                          onChange={(event) => updateShortage(shortage.id, { usage: event.target.value })}
-                        />
-                      </div>
-                      <div className="col-sm-6">
-                        <label className="form-label small fw-semibold">Variant File</label>
-                        <input
-                          type="file"
-                          accept=".xlsx,.xls,.csv"
-                          className="form-control form-control-sm"
-                          onChange={(event) => updateShortageFile(shortage.id, event.target.files?.[0] ?? null)}
-                        />
-                      </div>
-                    </div>
-                    <div className="shortage-card-footer">
-                      <small className="text-secondary">{shortage.file?.name || 'No variant file selected yet'}</small>
-                      <button
-                        type="button"
-                        className="btn btn-sm btn-outline-danger"
-                        onClick={() => removeShortage(shortage.id)}
-                      >
-                        <i className="bi bi-x" />
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          <div className="col-xl-4">
+          <div className="col-xl-8">
             <div className="step-card h-100">
               <div className="step-header">
                 <span>
-                  <i className="bi bi-3-circle-fill" /> Step 3: Upload reports
+                  <i className="bi bi-2-circle-fill" /> Step 2: Upload reports
                 </span>
               </div>
-              <div className="step-body d-flex flex-column">
-                <div className="report-upload-grid">
-                  {Object.entries(REPORT_TYPES).map(([reportKey, report]) => {
+              <div className="step-body upload-step-body">
+                <div className="report-stack">
+                  {['opening'].map((reportKey) => {
+                    const report = REPORT_TYPES[reportKey]
                     const inputId = `${fileInputId}-${reportKey}`
                     const selectedReportFile = reportFiles[reportKey]
+                    const restoredReportName = restoredFileNames.reports?.[reportKey]
 
                     return (
                       <div key={reportKey}>
@@ -3409,7 +4281,7 @@ function App() {
                         >
                           <i className="bi bi-file-earmark-spreadsheet upload-icon" />
                           <span className="upload-title">{report.title}</span>
-                          <strong className="upload-file">{selectedReportFile?.name || 'No file selected'}</strong>
+                          <strong className="upload-file">{selectedReportFile?.name || restoredReportName || 'No file selected'}</strong>
                         </label>
                         <input
                           id={inputId}
@@ -3421,57 +4293,66 @@ function App() {
                       </div>
                     )
                   })}
-                </div>
+                  <div className="mod-upload-stack">
+                    {['mod'].map((reportKey) => {
+                      const report = REPORT_TYPES[reportKey]
+                      const inputId = `${fileInputId}-${reportKey}`
+                      const selectedReportFile = reportFiles[reportKey]
+                      const restoredReportName = restoredFileNames.reports?.[reportKey]
 
-                <div className="mt-3">
-                  <label className="form-label fw-semibold small">MOD first non-skip TRIM LINE sequence</label>
-                  <div className="input-group input-group-sm">
-                    <span className="input-group-text">
-                      <i className="bi bi-list-ol" />
-                    </span>
-                    <input
-                      type="number"
-                      className="form-control"
-                      min="1"
-                      placeholder="Enter line in sequence"
-                      value={modStartSequence}
-                      onChange={(event) => setModStartSequence(event.target.value)}
-                    />
+                      return (
+                        <div key={reportKey}>
+                          <label
+                            htmlFor={inputId}
+                            className={`report-upload-card ${dragActiveReport === reportKey ? 'drag-active' : ''}`}
+                            onDragOver={(event) => {
+                              event.preventDefault()
+                              setDragActiveReport(reportKey)
+                            }}
+                            onDragLeave={() => setDragActiveReport(null)}
+                            onDrop={(event) => {
+                              event.preventDefault()
+                              setDragActiveReport(null)
+                              const file = event.dataTransfer.files?.[0]
+                              if (file) {
+                                updateReportFile(reportKey, file)
+                              }
+                            }}
+                          >
+                            <i className="bi bi-file-earmark-spreadsheet upload-icon" />
+                            <span className="upload-title">{report.title}</span>
+                            <strong className="upload-file">{selectedReportFile?.name || restoredReportName || 'No file selected'}</strong>
+                          </label>
+                          <input
+                            id={inputId}
+                            type="file"
+                            accept=".xlsx,.xls,.csv"
+                            className="d-none"
+                            onChange={(event) => updateReportFile(reportKey, event.target.files?.[0] ?? null)}
+                          />
+                        </div>
+                      )
+                    })}
+                    <div className="mod-sequence-field">
+                      <label className="form-label fw-semibold small">MOD first non-skip TRIM LINE sequence</label>
+                      <div className="input-group input-group-sm">
+                        <span className="input-group-text">
+                          <i className="bi bi-list-ol" />
+                        </span>
+                        <input
+                          type="number"
+                          className="form-control"
+                          min="1"
+                          placeholder="Enter line in sequence"
+                          value={modStartSequence}
+                          onChange={(event) => setModStartSequence(event.target.value)}
+                        />
+                      </div>
+                    </div>
                   </div>
                 </div>
 
-                <div className="report-upload-grid auxiliary-report-grid mt-3">
-                  <div>
-                    <label
-                      htmlFor={`${fileInputId}-seven-days-report`}
-                      className={`report-upload-card engine-status-upload ${dragActiveReport === 'seven-days-report' ? 'drag-active' : ''}`}
-                      onDragOver={(event) => {
-                        event.preventDefault()
-                        setDragActiveReport('seven-days-report')
-                      }}
-                      onDragLeave={() => setDragActiveReport(null)}
-                      onDrop={(event) => {
-                        event.preventDefault()
-                        setDragActiveReport(null)
-                        const file = event.dataTransfer.files?.[0]
-                        if (file) {
-                          updateSevenDaysReportFile(file)
-                        }
-                      }}
-                    >
-                      <i className="bi bi-calendar-week upload-icon" />
-                      <span className="upload-title">7 Days Report</span>
-                      <strong className="upload-file">{sevenDaysReportFile?.name || 'No 7 days report selected'}</strong>
-                    </label>
-                    <input
-                      id={`${fileInputId}-seven-days-report`}
-                      type="file"
-                      accept=".xlsx,.xls,.csv"
-                      className="d-none"
-                      onChange={(event) => updateSevenDaysReportFile(event.target.files?.[0] ?? null)}
-                    />
-                  </div>
-
+                <div className="status-report-stack">
                   <div>
                     <label
                       htmlFor={`${fileInputId}-engine-status`}
@@ -3492,7 +4373,7 @@ function App() {
                     >
                       <i className="bi bi-gear-wide-connected upload-icon" />
                       <span className="upload-title">Engine &amp; Transmission</span>
-                      <strong className="upload-file">{engineStatusFile?.name || 'No status report selected'}</strong>
+                      <strong className="upload-file">{engineStatusFile?.name || restoredFileNames.engineStatusFile || 'No status report selected'}</strong>
                     </label>
                     <input
                       id={`${fileInputId}-engine-status`}
@@ -3500,6 +4381,84 @@ function App() {
                       accept=".xlsx,.xls,.csv"
                       className="d-none"
                       onChange={(event) => updateEngineStatusFile(event.target.files?.[0] ?? null)}
+                    />
+                  </div>
+
+                  <div>
+                    <label
+                      htmlFor={`${fileInputId}-frame-status`}
+                      className={`report-upload-card engine-status-upload ${dragActiveReport === 'frame-status' ? 'drag-active' : ''}`}
+                      onDragOver={(event) => {
+                        event.preventDefault()
+                        setDragActiveReport('frame-status')
+                      }}
+                      onDragLeave={() => setDragActiveReport(null)}
+                      onDrop={(event) => {
+                        event.preventDefault()
+                        setDragActiveReport(null)
+                        const file = event.dataTransfer.files?.[0]
+                        if (file) {
+                          updateFrameStatusFile(file)
+                        }
+                      }}
+                    >
+                      <i className="bi bi-truck-front upload-icon" />
+                      <span className="upload-title">Frame Status</span>
+                      <strong className="upload-file">{frameStatusFile?.name || restoredFileNames.frameStatusFile || 'No frame status report selected'}</strong>
+                    </label>
+                    <input
+                      id={`${fileInputId}-frame-status`}
+                      type="file"
+                      accept=".xlsx,.xlsm"
+                      className="d-none"
+                      onChange={(event) => updateFrameStatusFile(event.target.files?.[0] ?? null)}
+                    />
+                  </div>
+
+                  <button className="btn btn-primary btn-sm fw-semibold upload-column-action" type="button" disabled={loading} onClick={runAnalysis}>
+                    {loading ? (
+                      <>
+                        <span className="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true" />
+                        Analyzing
+                      </>
+                    ) : (
+                      <>
+                        <i className="bi bi-search me-1" />
+                        Analyze
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                <div className="coverage-report-stack">
+                  <div>
+                    <label
+                      htmlFor={`${fileInputId}-seven-days-report`}
+                      className={`report-upload-card engine-status-upload ${dragActiveReport === 'seven-days-report' ? 'drag-active' : ''}`}
+                      onDragOver={(event) => {
+                        event.preventDefault()
+                        setDragActiveReport('seven-days-report')
+                      }}
+                      onDragLeave={() => setDragActiveReport(null)}
+                      onDrop={(event) => {
+                        event.preventDefault()
+                        setDragActiveReport(null)
+                        const file = event.dataTransfer.files?.[0]
+                        if (file) {
+                          updateSevenDaysReportFile(file)
+                        }
+                      }}
+                    >
+                      <i className="bi bi-calendar-week upload-icon" />
+                      <span className="upload-title">7 Days Report</span>
+                      <strong className="upload-file">{sevenDaysReportFile?.name || restoredFileNames.sevenDaysReportFile || 'No 7 days report selected'}</strong>
+                    </label>
+                    <input
+                      id={`${fileInputId}-seven-days-report`}
+                      type="file"
+                      accept=".xlsx,.xls,.csv"
+                      className="d-none"
+                      onChange={(event) => updateSevenDaysReportFile(event.target.files?.[0] ?? null)}
                     />
                   </div>
 
@@ -3523,7 +4482,7 @@ function App() {
                     >
                       <i className="bi bi-circle-square upload-icon" />
                       <span className="upload-title">Axle Status</span>
-                      <strong className="upload-file">{axleStatusFile?.name || 'No axle status report selected'}</strong>
+                      <strong className="upload-file">{axleStatusFile?.name || restoredFileNames.axleStatusFile || 'No axle status report selected'}</strong>
                     </label>
                     <input
                       id={`${fileInputId}-axle-status`}
@@ -3533,64 +4492,18 @@ function App() {
                       onChange={(event) => updateAxleStatusFile(event.target.files?.[0] ?? null)}
                     />
                   </div>
-                  {lineType === 'HDT' ? (
-                    <div>
-                      <label
-                        htmlFor={`${fileInputId}-frame-status`}
-                        className={`report-upload-card engine-status-upload ${dragActiveReport === 'frame-status' ? 'drag-active' : ''}`}
-                        onDragOver={(event) => {
-                          event.preventDefault()
-                          setDragActiveReport('frame-status')
-                        }}
-                        onDragLeave={() => setDragActiveReport(null)}
-                        onDrop={(event) => {
-                          event.preventDefault()
-                          setDragActiveReport(null)
-                          const file = event.dataTransfer.files?.[0]
-                          if (file) {
-                            updateFrameStatusFile(file)
-                          }
-                        }}
-                      >
-                        <i className="bi bi-truck-front upload-icon" />
-                        <span className="upload-title">Frame Status</span>
-                        <strong className="upload-file">{frameStatusFile?.name || 'No frame status report selected'}</strong>
-                      </label>
-                      <input
-                        id={`${fileInputId}-frame-status`}
-                        type="file"
-                        accept=".xlsx,.xlsm"
-                        className="d-none"
-                        onChange={(event) => updateFrameStatusFile(event.target.files?.[0] ?? null)}
-                      />
-                    </div>
-                  ) : null}
-                </div>
 
-                <div className="action-row">
-                  <button className="btn btn-outline-secondary btn-sm px-3" type="button" onClick={resetAll}>
+                  <button className="btn btn-outline-secondary btn-sm upload-column-action" type="button" onClick={confirmResetAll}>
                     Reset
                   </button>
-                  <button className="btn btn-primary btn-sm px-4 fw-semibold" type="button" disabled={loading} onClick={runAnalysis}>
-                    {loading ? (
-                      <>
-                        <span className="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true" />
-                        Analyzing
-                      </>
-                    ) : (
-                      <>
-                        <i className="bi bi-search me-1" />
-                        Analyze
-                      </>
-                    )}
-                  </button>
                 </div>
+
               </div>
             </div>
           </div>
         </section>
 
-        {analysis ? (
+        {shouldShowWorkspace ? (
           <div ref={resultsRef} className="results-shell">
             <section className="report-view-panel" aria-label="Report analytics selector">
               <div>
@@ -3619,15 +4532,23 @@ function App() {
                 draft={criticalPartDraft}
                 lookupLoading={criticalLookupLoading}
                 sevenDaysReportFile={sevenDaysReportFile}
+                sevenDaysReportFileName={restoredFileNames.sevenDaysReportFile}
                 onDraftChange={updateCriticalPartDraft}
                 onDraftPartBlur={fillCriticalPartDraftFromReport}
                 onDraftRefresh={fillCriticalPartDraftFromReport}
+                onDraftVariantFileChange={updateCriticalPartDraftVariantFile}
                 onAddPart={addCriticalPart}
                 bulkInput={criticalPartBulkInput}
                 onBulkInputChange={setCriticalPartBulkInput}
+                bulkVariantFiles={criticalPartBulkVariantFiles}
+                onBulkVariantFilesChange={setCriticalPartBulkVariantFiles}
                 onBulkAdd={addBulkCriticalParts}
                 onPartChange={updateCriticalPart}
+                onPartVariantFileChange={updateCriticalPartVariantFile}
                 onRemovePart={removeCriticalPart}
+                onUpdateImpactAnalysis={() => refreshImpactAnalysisFromCriticalParts(criticalParts)}
+                analysisLoading={loading}
+                resolvedParts={resolvedCriticalParts}
               />
             ) : activeReport === 'plan' ? (
               <PlanSummaryView
@@ -3954,12 +4875,30 @@ function App() {
                                 <strong>{card.shortageDate}</strong>
                               </div>
                               <div>
-                                <span className="detail-label">Time of Impact</span>
-                                <strong>{card.impactTime}</strong>
+                                <span className="detail-label">Scheduled Time of Impact</span>
+                                <strong>{card.scheduledImpactTime ?? card.impactTime}</strong>
+                              </div>
+                              <div>
+                                <span className="detail-label">Point of Fit Station</span>
+                                <strong>{card.pointOfFitStation || 'N/A'}</strong>
+                              </div>
+                              <div>
+                                <span className="detail-label">Point of Fit Time of Impact</span>
+                                <strong>{card.pointOfFitImpactTime ?? 'N/A'}</strong>
                               </div>
                               <div>
                                 <span className="detail-label">Sequence Numbers</span>
-                                <strong>{card.firstDaySequences}</strong>
+                                {Array.isArray(card.firstDaySequenceNumbers) && card.firstDaySequenceNumbers.length > 0 ? (
+                                  <div className="sequence-number-list">
+                                    {card.firstDaySequenceNumbers.map((sequenceNumber, sequenceIndex) => (
+                                      <span key={`${card.part}-first-day-sequence-${sequenceNumber}-${sequenceIndex}`}>
+                                        {sequenceNumber}
+                                      </span>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <strong>{card.firstDaySequences}</strong>
+                                )}
                               </div>
                               <div className="full-span">
                                 <span className="detail-label">Connecting Models</span>

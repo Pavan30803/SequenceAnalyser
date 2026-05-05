@@ -1,0 +1,230 @@
+{
+  "currentDay": "2026-05-04",
+  "rowCount": 107,
+  "engine": [
+    {
+      "status": "FG",
+      "count": 88
+    },
+    {
+      "status": "Rapid Prime",
+      "count": 17
+    },
+    {
+      "status": "Paint Area",
+      "count": 1
+    },
+    {
+      "status": "Tested Buffer",
+      "count": 1
+    }
+  ],
+  "transmission": [
+    {
+      "status": "Created",
+      "count": 43
+    },
+    {
+      "status": "Retrieved",
+      "count": 23
+    },
+    {
+      "status": "Released",
+      "count": 19
+    },
+    {
+      "status": "FG",
+      "count": 10
+    },
+    {
+      "status": "ShaftLine",
+      "count": 4
+    },
+    {
+      "status": "Main Line Entry Buffer",
+      "count": 3
+    },
+    {
+      "status": "Main Line",
+      "count": 2
+    },
+    {
+      "status": "Retrieval Trigger Received",
+      "count": 1
+    }
+  ],
+  "axle": [
+    {
+      "status": "AVAILABLE",
+      "count": 105
+    },
+    {
+      "status": "IN TRANSIT",
+      "count": 2
+    }
+  ],
+  "frame": [
+    {
+      "status": "COVERED",
+      "count": 46
+    },
+    {
+      "status": "To Be Prod",
+      "count": 35
+    },
+    {
+      "status": "Part Shortage",
+      "count": 16
+    },
+    {
+      "status": "WIP",
+      "count": 10
+    }
+  ],
+  "shifts": [
+    {
+      "label": "A shift",
+      "rowCount": 54,
+      "engine": [
+        {
+          "status": "FG",
+          "count": 46
+        },
+        {
+          "status": "Rapid Prime",
+          "count": 8
+        }
+      ],
+      "transmission": [
+        {
+          "status": "Retrieved",
+          "count": 22
+        },
+        {
+          "status": "Released",
+          "count": 9
+        },
+        {
+          "status": "Created",
+          "count": 8
+        },
+        {
+          "status": "FG",
+          "count": 7
+        },
+        {
+          "status": "Main Line Entry Buffer",
+          "count": 3
+        },
+        {
+          "status": "ShaftLine",
+          "count": 3
+        },
+        {
+          "status": "Main Line",
+          "count": 2
+        }
+      ],
+      "axle": [
+        {
+          "status": "AVAILABLE",
+          "count": 54
+        }
+      ],
+      "frame": [
+        {
+          "status": "COVERED",
+          "count": 24
+        },
+        {
+          "status": "To Be Prod",
+          "count": 21
+        },
+        {
+          "status": "WIP",
+          "count": 7
+        },
+        {
+          "status": "Part Shortage",
+          "count": 2
+        }
+      ]
+    },
+    {
+      "label": "B shift",
+      "rowCount": 53,
+      "engine": [
+        {
+          "status": "FG",
+          "count": 42
+        },
+        {
+          "status": "Rapid Prime",
+          "count": 9
+        },
+        {
+          "status": "Paint Area",
+          "count": 1
+        },
+        {
+          "status": "Tested Buffer",
+          "count": 1
+        }
+      ],
+      "transmission": [
+        {
+          "status": "Created",
+          "count": 35
+        },
+        {
+          "status": "Released",
+          "count": 10
+        },
+        {
+          "status": "FG",
+          "count": 3
+        },
+        {
+          "status": "Retrieval Trigger Received",
+          "count": 1
+        },
+        {
+          "status": "Retrieved",
+          "count": 1
+        },
+        {
+          "status": "ShaftLine",
+          "count": 1
+        }
+      ],
+      "axle": [
+        {
+          "status": "AVAILABLE",
+          "count": 51
+        },
+        {
+          "status": "IN TRANSIT",
+          "count": 2
+        }
+      ],
+      "frame": [
+        {
+          "status": "COVERED",
+          "count": 22
+        },
+        {
+          "status": "Part Shortage",
+          "count": 14
+        },
+        {
+          "status": "To Be Prod",
+          "count": 14
+        },
+        {
+          "status": "WIP",
+          "count": 3
+        }
+      ]
+    }
+  ]
+}

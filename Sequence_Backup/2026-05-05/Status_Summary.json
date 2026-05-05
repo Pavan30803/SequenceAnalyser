@@ -1,0 +1,183 @@
+{
+  "currentDay": "2026-05-05",
+  "rowCount": 107,
+  "engine": [
+    {
+      "status": "FG",
+      "count": 86
+    },
+    {
+      "status": "Rapid Prime",
+      "count": 20
+    },
+    {
+      "status": "Paint Area",
+      "count": 1
+    }
+  ],
+  "transmission": [
+    {
+      "status": "Created",
+      "count": 41
+    },
+    {
+      "status": "Released",
+      "count": 26
+    },
+    {
+      "status": "FG",
+      "count": 22
+    },
+    {
+      "status": "Main Line",
+      "count": 8
+    },
+    {
+      "status": "Rework Area",
+      "count": 4
+    },
+    {
+      "status": "Rollout Buffer",
+      "count": 4
+    },
+    {
+      "status": "Test Completed Buffer",
+      "count": 2
+    }
+  ],
+  "axle": [],
+  "frame": [
+    {
+      "status": "Part Shortage",
+      "count": 50
+    },
+    {
+      "status": "COVERED",
+      "count": 39
+    },
+    {
+      "status": "WIP",
+      "count": 18
+    }
+  ],
+  "shifts": [
+    {
+      "label": "A shift",
+      "rowCount": 54,
+      "engine": [
+        {
+          "status": "FG",
+          "count": 40
+        },
+        {
+          "status": "Rapid Prime",
+          "count": 14
+        }
+      ],
+      "transmission": [
+        {
+          "status": "Created",
+          "count": 19
+        },
+        {
+          "status": "FG",
+          "count": 18
+        },
+        {
+          "status": "Released",
+          "count": 6
+        },
+        {
+          "status": "Main Line",
+          "count": 5
+        },
+        {
+          "status": "Rework Area",
+          "count": 3
+        },
+        {
+          "status": "Test Completed Buffer",
+          "count": 2
+        },
+        {
+          "status": "Rollout Buffer",
+          "count": 1
+        }
+      ],
+      "axle": [],
+      "frame": [
+        {
+          "status": "COVERED",
+          "count": 34
+        },
+        {
+          "status": "Part Shortage",
+          "count": 15
+        },
+        {
+          "status": "WIP",
+          "count": 5
+        }
+      ]
+    },
+    {
+      "label": "B shift",
+      "rowCount": 53,
+      "engine": [
+        {
+          "status": "FG",
+          "count": 46
+        },
+        {
+          "status": "Rapid Prime",
+          "count": 6
+        },
+        {
+          "status": "Paint Area",
+          "count": 1
+        }
+      ],
+      "transmission": [
+        {
+          "status": "Created",
+          "count": 22
+        },
+        {
+          "status": "Released",
+          "count": 20
+        },
+        {
+          "status": "FG",
+          "count": 4
+        },
+        {
+          "status": "Main Line",
+          "count": 3
+        },
+        {
+          "status": "Rollout Buffer",
+          "count": 3
+        },
+        {
+          "status": "Rework Area",
+          "count": 1
+        }
+      ],
+      "axle": [],
+      "frame": [
+        {
+          "status": "Part Shortage",
+          "count": 35
+        },
+        {
+          "status": "WIP",
+          "count": 13
+        },
+        {
+          "status": "COVERED",
+          "count": 5
+        }
+      ]
+    }
+  ]
+}

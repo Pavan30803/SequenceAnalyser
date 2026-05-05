@@ -1,0 +1,29 @@
+[
+  {
+    "part": "A4003220479",
+    "partName": "A part",
+    "covered": false,
+    "shortageDate": "2026-05-15",
+    "impactTime": "8:50 AM",
+    "connectingModels": "3532CM",
+    "firstDaySequences": "11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 40, 43",
+    "forecast": [
+      {
+        "date": "2026-05-15",
+        "dayPlan": 15,
+        "shortageQty": 15
+      },
+      {
+        "date": "2026-05-16",
+        "dayPlan": 0,
+        "shortageQty": 0
+      },
+      {
+        "date": "2026-05-18",
+        "dayPlan": 0,
+        "shortageQty": 0
+      }
+    ],
+    "unscheduled": false
+  }
+]
